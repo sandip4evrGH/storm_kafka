@@ -251,6 +251,43 @@ public class AppConfig {
         cluster.shutdown();
     }
 }
+
+
+package com.myapp.storm;
+
+import org.apache.storm.Config;
+import org.apache.storm.LocalCluster;
+import org.apache.storm.generated.StormTopology;
+import org.apache.storm.topology.TopologyBuilder;
+
+public class KafkaClientTopology {
+
+    public static void main(String[] args) throws Exception {
+        // Topology
+        TopologyBuilder builder = new TopologyBuilder();
+        builder.setSpout("kafka-spout", new KafkaClientSpout(), 1);
+        builder.setBolt("print-bolt", (tuple, collector) -> {
+            System.out.println("Received message: " + tuple.getStringByField("value"));
+            collector.emit(tuple.getValues());
+        }).shuffleGrouping("kafka-spout");
+
+        // Configuration
+        Config config = new Config();
+        config.setDebug(true);
+
+        // Local cluster
+        LocalCluster cluster = new LocalCluster();
+        StormTopology topology = builder.createTopology();
+        cluster.submitTopology("kafka-client-topology", config, topology);
+
+        // Keep the topology running for 60 seconds for demonstration purposes
+        Thread.sleep(60000);
+        cluster.killTopology("kafka-client-topology");
+        cluster.shutdown();
+    }
+}
+
+
 Explanation
 Kafka Producer Bolt: The new bolt uses the Kafka producer to send messages to another Kafka topic.
 
