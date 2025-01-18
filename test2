@@ -1,0 +1,259 @@
+Include producer to create from messages received from consumer to another topic
+Let's modify our application to include a Kafka producer that sends messages received from the consumer to another Kafka topic.
+
+Updated Project Structure
+my-storm-kafka-client-app/
+|-- src/
+|   |-- main/
+|   |   |-- java/
+|   |   |   |-- com/
+|   |   |   |   |-- myapp/
+|   |   |   |       |-- config/
+|   |   |   |       |   |-- AppConfig.java
+|   |   |   |       |-- storm/
+|   |   |   |       |   |-- KafkaClientSpout.java
+|   |   |   |       |   |-- KafkaClientTopology.java
+|   |   |   |       |   |-- KafkaProducerBolt.java
+|   |   |       |-- resources/
+|   |   |       |   |-- spring/
+|   |   |       |       |-- applicationContext.xml
+|-- pom.xml
+Dependencies
+Ensure you have the following dependencies in your pom.xml file:
+
+xml
+<dependencies>
+    <!-- Kafka dependency -->
+    <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>kafka_2.11</artifactId>
+        <version>1.1.0</version>
+    </dependency>
+    <!-- Spring dependencies -->
+    <dependency>
+        <groupId>org.springframework</groupId>
+        <artifactId>spring-context</artifactId>
+        <version>5.3.20</version>
+    </dependency>
+    <!-- Storm dependencies -->
+    <dependency>
+        <groupId>org.apache.storm</groupId>
+        <artifactId>storm-core</artifactId>
+        <version>2.4.0</version>
+    </dependency>
+</dependencies>
+Kafka Client Spout
+Ensure KafkaClientSpout.java is up-to-date:
+
+java
+package com.myapp.storm;
+
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.storm.spout.SpoutOutputCollector;
+import org.apache.storm.spout.ISpout;
+import org.apache.storm.task.TopologyContext;
+import org.apache.storm.tuple.Fields;
+import org.apache.storm.tuple.Values;
+
+import java.util.Collections;
+import java.util.Map;
+import java.util.Properties;
+
+public class KafkaClientSpout implements ISpout {
+    private SpoutOutputCollector collector;
+    private KafkaConsumer<String, String> consumer;
+
+    private String bootstrapServers;
+    private String groupId;
+    private String topic;
+
+    public void setBootstrapServers(String bootstrapServers) {
+        this.bootstrapServers = bootstrapServers;
+    }
+
+    public void setGroupId(String groupId) {
+        this.groupId = groupId;
+    }
+
+    public void setTopic(String topic) {
+        this.topic = topic;
+    }
+
+    @Override
+    public void open(Map<String, Object> conf, TopologyContext context, SpoutOutputCollector collector) {
+        this.collector = collector;
+
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+
+        consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic));
+    }
+
+    @Override
+    public void nextTuple() {
+        ConsumerRecords<String, String> records = consumer.poll(100);
+        for (ConsumerRecord<String, String> record : records) {
+            collector.emit(new Values(record.value()));
+        }
+    }
+
+    @Override
+    public void close() {
+        consumer.close();
+    }
+
+    @Override
+    public void declareOutputFields(org.apache.storm.topology.OutputFieldsDeclarer declarer) {
+        declarer.declare(new Fields("value"));
+    }
+
+    @Override
+    public void ack(Object msgId) { }
+
+    @Override
+    public void fail(Object msgId) { }
+}
+Kafka Producer Bolt
+Create KafkaProducerBolt.java under com.myapp.storm:
+
+java
+package com.myapp.storm;
+
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.storm.task.OutputCollector;
+import org.apache.storm.task.TopologyContext;
+import org.apache.storm.topology.IRichBolt;
+import org.apache.storm.tuple.Tuple;
+
+import java.util.Map;
+import java.util.Properties;
+
+public class KafkaProducerBolt implements IRichBolt {
+    private OutputCollector collector;
+    private KafkaProducer<String, String> producer;
+   
+    private String bootstrapServers;
+    private String targetTopic;
+
+    public void setBootstrapServers(String bootstrapServers) {
+        this.bootstrapServers = bootstrapServers;
+    }
+
+    public void setTargetTopic(String targetTopic) {
+        this.targetTopic = targetTopic;
+    }
+
+    @Override
+    public void prepare(Map<String, Object> conf, TopologyContext context, OutputCollector collector) {
+        this.collector = collector;
+       
+        Properties props = new Properties();
+        props.put("bootstrap.servers", bootstrapServers);
+        props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+
+        producer = new KafkaProducer<>(props);
+    }
+
+    @Override
+    public void execute(Tuple tuple) {
+        String message = tuple.getStringByField("value");
+        producer.send(new ProducerRecord<>(targetTopic, message));
+        collector.ack(tuple);
+    }
+
+    @Override
+    public void cleanup() {
+        producer.close();
+    }
+
+    @Override
+    public void declareOutputFields(org.apache.storm.topology.OutputFieldsDeclarer declarer) {
+    }
+
+    @Override
+    public Map<String, Object> getComponentConfiguration() {
+        return null;
+    }
+}
+Spring XML Configuration
+Update applicationContext.xml to include the Kafka producer configuration:
+
+xml
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+           http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+    <!-- Kafka consumer bean -->
+    <bean id="kafkaConsumer" class="com.myapp.storm.KafkaClientSpout">
+        <property name="bootstrapServers" value="localhost:9092"/>
+        <property name="groupId" value="storm-kafka-client"/>
+        <property name="topic" value="my-input-topic"/>
+    </bean>
+   
+    <!-- Kafka producer bolt bean -->
+    <bean id="kafkaProducer" class="com.myapp.storm.KafkaProducerBolt">
+        <property name="bootstrapServers" value="localhost:9092"/>
+        <property name="targetTopic" value="my-output-topic"/>
+    </bean>
+</beans>
+Main Application
+Update AppConfig.java to include the Kafka producer bolt in the topology:
+
+java
+package com.myapp.config;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.support.ClassPathXmlApplicationContext;
+import com.myapp.storm.KafkaClientSpout;
+import com.myapp.storm.KafkaProducerBolt;
+import org.apache.storm.Config;
+import org.apache.storm.LocalCluster;
+import org.apache.storm.generated.StormTopology;
+import org.apache.storm.topology.TopologyBuilder;
+
+public class AppConfig {
+    public static void main(String[] args) {
+        ApplicationContext context = new ClassPathXmlApplicationContext("spring/applicationContext.xml");
+        KafkaClientSpout kafkaClientSpout = (KafkaClientSpout) context.getBean("kafkaConsumer");
+        KafkaProducerBolt kafkaProducerBolt = (KafkaProducerBolt) context.getBean("kafkaProducer");
+
+        // Topology Builder
+        TopologyBuilder builder = new TopologyBuilder();
+        builder.setSpout("kafka-spout", kafkaClientSpout, 1);
+        builder.setBolt("kafka-producer-bolt", kafkaProducerBolt, 1).shuffleGrouping("kafka-spout");
+
+        // Configuration
+        Config config = new Config();
+        config.setDebug(true);
+
+        // Local Cluster
+        LocalCluster cluster = new LocalCluster();
+        StormTopology topology = builder.createTopology();
+        cluster.submitTopology("kafka-client-topology", config, topology);
+
+        // Keep the topology running for 60 seconds for demonstration purposes
+        try {
+            Thread.sleep(60000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        cluster.killTopology("kafka-client-topology");
+        cluster.shutdown();
+    }
+}
+Explanation
+Kafka Producer Bolt: The new bolt uses the Kafka producer to send messages to another Kafka topic.
+
+Spring XML Configuration: Defines the Kafka producer bolt bean with properties.
+
+Main Application: Initializes the Spring context, retrieves the KafkaClientSpout and KafkaProducerBolt beans, and configures the Storm topology to include the producer bolt.
