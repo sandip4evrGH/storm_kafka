@@ -1,0 +1,486 @@
+Override propertie file variable with commandline option
+To override properties from the server-config.properties file with command-line options, we'll make use of the Apache Commons Configuration library. This allows us to load the properties from the file and then override them with values from the command line.
+
+1. Update the Configuration File
+Ensure server-config.properties contains default values:
+
+server-config.properties
+properties
+# Kafka configuration
+kafka.bootstrap.servers=kafka-cluster:9092
+kafka.topic.names=topic1,topic2,topic3
+kafka.consumer.group.id=storm-consumer-group
+zookeeper.servers=zookeeper-cluster:2181
+zk.root=/storm
+
+# Storm configuration
+storm.cluster.mode=local # Change to 'remote' for cluster mode
+2. Spring XML Configuration
+spring-config.xml
+xml
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+    <!-- Load Properties File -->
+    <bean id="propertyConfigurer" class="org.springframework.beans.factory.config.PropertyPlaceholderConfigurer">
+        <property name="location" value="classpath:server-config.properties"/>
+    </bean>
+
+    <!-- Kafka Producer Configuration -->
+    <bean id="kafkaProducerProperties" class="org.springframework.beans.factory.config.PropertiesFactoryBean">
+        <property name="properties">
+            <props>
+                <prop key="bootstrap.servers">${kafka.bootstrap.servers}</prop>
+                <prop key="key.serializer">org.apache.kafka.common.serialization.StringSerializer</prop>
+                <prop key="value.serializer">org.apache.kafka.common.serialization.StringSerializer</prop>
+            </props>
+        </property>
+    </bean>
+
+    <bean id="kafkaProducer" class="org.apache.kafka.clients.producer.KafkaProducer">
+        <constructor-arg ref="kafkaProducerProperties"/>
+    </bean>
+
+    <!-- Kafka Consumer Configuration -->
+    <bean id="kafkaConsumerProperties" class="org.springframework.beans.factory.config.PropertiesFactoryBean">
+        <property name="properties">
+            <props>
+                <prop key="bootstrap.servers">${kafka.bootstrap.servers}</prop>
+                <prop key="group.id">${kafka.consumer.group.id}</prop>
+                <prop key="key.deserializer">org.apache.kafka.common.serialization.StringDeserializer</prop>
+                <prop key="value.deserializer">org.apache.kafka.common.serialization.StringDeserializer</prop>
+            </props>
+        </property>
+    </bean>
+
+    <bean id="kafkaConsumer" class="org.apache.kafka.clients.consumer.KafkaConsumer">
+        <constructor-arg ref="kafkaConsumerProperties"/>
+    </bean>
+
+    <!-- Storm Topology Configuration -->
+    <bean id="processingBolt" class="com.example.MessageProcessingBolt"/>
+
+    <bean id="stormTopology" class="org.apache.storm.topology.TopologyBuilder">
+        <property name="spouts">
+            <map>
+                <entry key="kafka-spout" value-ref="kafkaSpout"/>
+            </map>
+        </property>
+        <property name="bolts">
+            <map>
+                <entry key="processing-bolt">
+                    <bean class="org.apache.storm.topology.BoltDeclarer">
+                        <constructor-arg>
+                            <bean class="org.apache.storm.topology.ComponentConfigurationDeclarer">
+                                <constructor-arg ref="processingBolt"/>
+                                <constructor-arg value="kafka-spout"/>
+                            </bean>
+                        </constructor-arg>
+                    </bean>
+                </entry>
+            </map>
+        </property>
+    </bean>
+    
+</beans>
+3. Update Producer and Consumer Classes
+KafkaMessageProducer.java
+java
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.support.ClassPathXmlApplicationContext;
+
+import java.util.List;
+import java.util.Arrays;
+
+public class KafkaMessageProducer {
+    public static void produceMessages(String bootstrapServers, String topicsConfig) {
+        List<String> topics = Arrays.asList(topicsConfig.split(","));
+
+        ApplicationContext context = new ClassPathXmlApplicationContext("spring-config.xml");
+        KafkaProducer<String, String> producer = context.getBean(KafkaProducer.class);
+
+        for (int i = 0; i < 1000000; i++) {
+            for (String topic : topics) {
+                ProducerRecord<String, String> record = new ProducerRecord<>(topic, "key-" + i, "message-" + i);
+                producer.send(record);
+            }
+        }
+
+        producer.close();
+    }
+}
+KafkaMessageConsumer.java
+java
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.support.ClassPathXmlApplicationContext;
+
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+
+public class KafkaMessageConsumer {
+    public static void consumeMessages(String bootstrapServers, String topicsConfig) {
+        List<String> topics = Arrays.asList(topicsConfig.split(","));
+
+        ApplicationContext context = new ClassPathXmlApplicationContext("spring-config.xml");
+        KafkaConsumer<String, String> consumer = context.getBean(KafkaConsumer.class);
+
+        consumer.subscribe(topics);
+
+        while (true) {
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+            for (ConsumerRecord<String, String> record : records) {
+                System.out.printf("Consumed message: %s%n", record.value());
+            }
+        }
+    }
+}
+4. Main Application Class
+Application.java
+java
+import org.apache.commons.cli.*;
+import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.storm.Config;
+import org.apache.storm.LocalCluster;
+import org.apache.storm.StormSubmitter;
+import org.apache.storm.topology.TopologyBuilder;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.support.ClassPathXmlApplicationContext;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.Properties;
+
+public class Application {
+    public static void main(String[] args) throws Exception {
+        Options options = new Options();
+
+        options.addOption("mode", true, "Mode: producer, consumer");
+        options.addOption("bootstrapServers", true, "Kafka Bootstrap Servers");
+        options.addOption("topics", true, "Kafka Topics (comma-separated)");
+
+        CommandLineParser parser = new DefaultParser();
+        CommandLine cmd = parser.parse(options, args);
+
+        if (!cmd.hasOption("mode") || !cmd.hasOption("bootstrapServers") || !cmd.hasOption("topics")) {
+            HelpFormatter formatter = new HelpFormatter();
+            formatter.printHelp("Application", options);
+            return;
+        }
+
+        String mode = cmd.getOptionValue("mode");
+        String bootstrapServers = cmd.getOptionValue("bootstrapServers");
+        String topicsConfig = cmd.getOptionValue("topics");
+
+        // Load properties from file
+        PropertiesConfiguration config = new PropertiesConfiguration("server-config.properties");
+
+        // Override properties with command line options
+        config.setProperty("kafka.bootstrap.servers", bootstrapServers);
+        config.setProperty("kafka.topic.names", topicsConfig);
+
+        ApplicationContext context = new ClassPathXmlApplicationContext("spring-config.xml");
+
+        // Set properties for Spring beans
+        System.setProperty("kafka.bootstrap.servers", bootstrapServers);
+        System.setProperty("kafka.topic.names", topicsConfig);
+
+        // Start Storm topology
+        Properties consumerProps = context.getBean("kafkaConsumerProperties", Properties.class);
+        KafkaConsumer<String, String> consumer = context.getBean(KafkaConsumer.class);
+        KafkaSpout kafkaSpout = new KafkaSpout(topicsConfig.split(","), consumer);
+
+        TopologyBuilder builder = context.getBean(TopologyBuilder.class);
+        builder.setSpout("kafka-spout", kafkaSpout);
+        builder.setBolt("processing-bolt", context.getBean(MessageProcessingBolt.class)).shuffleGrouping("kafka-spout");
+
+        Config stormConfig = new Config();
+        stormConfig.setDebug(true);
+
+        String clusterMode = config.getString("storm.cluster.mode");
+
+        if ("remote".equalsIgnoreCase(clusterMode)) {
+            StormSubmitter.submitTopology("kafka-storm-topology", stormConfig, builder.createTopology());
+        } else {
+            LocalCluster cluster = new LocalCluster();
+            cluster.submitTopology("kafka-storm-topology", stormConfig, builder.createTopology());
+        }
+
+        // Run Kafka producer or consumer
+        if ("producer".equalsIgnoreCase(mode)) {
+            KafkaMessageProducer.produceMessages(bootstrapServers, topicsConfig);
+        } else if ("consumer".equalsIgnoreCase(mode)) {
+            KafkaMessageConsumer.consumeMessages(bootstrapServers, topicsConfig);
+        }
+    }
+}
+5. Maven POM File
+pom.xml
+xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>storm-kafka-integration</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+            <version>5.3.8</version>[[_{{{CITATION{{{_1{](https://github.com/easesstone/Conclusions/tree/e092c258471060833b745c83d72c55e5e94381e4/AADocs%2Fweb-docs%2FSpring%2FSpring%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0.md)[_{{{CITATION{{{_2{](https://github.com/fightinggg/hexo-blog/tree/45740b961decb2afc08f3fbb518fdf47d2733a54/blog%2FLanguage%2FJava%2FSpringMVC%2FSpringMVC1-%E5%BC%80%E5%A4%B4%2Findex.md)[_{{{CITATION{{{_3{](https://github.com/LiuChengYus/y2166/tree/115769065a7a4d2e33dfb98494dfa0864092a170/11v-handler-real%2Fsrc%2Fmain%2Fjava%2Fcom%2Faccp%2Fv%2Fhandler%2Freal%2FLoginHandler.java)[_{{{CITATION{{{_4{](https://github.com/alxg2112/jms-storm-sample/tree/27bcfaaa07029df0c468da8ae87c5f407b6a93af/src%2Fmain%2Fjava%2FTopology.java)[_{{{CITATION{{{_5{](https://github.com/cloudfstrife/Hermes/tree/abe0b18b5732f20fa28c8c671e0a8e1d13fd21b1/content%2Fpost%2FJava%2Fmaven%2F08.maven%E8%81%9A%E5%90%88%E4%B8%8E%E7%BB%A7%E6%89%BF.md)[_{{{CITATION{{{_6{](https://github.com/jisonami/jisonami.github.io/tree/3696afd342284791bc7bd60ed1838503c04092c9/_posts%2FMaven%2F2016-12-04-MavenUsageSummary.md)[_{{{CITATION{{{_7{](https://github.com/Halooooooo/learnjenkins2/tree/30670ac1ba9bd6c98f93251a18f0a8788be717ce/README.md)[_{{{CITATION{{{_8{](https://github.com/anxueying/Exer2020/tree/8c392c7dc10ecbc55538b32e73997ebf368afb08/notes%2FStage2%2F1_Maven%2Fmd%2FMaven%E5%A4%8D%E4%B9%A0.md)[_{{{CITATION{{{_9{](https://github.com/Ikuyadeu/github-api-scripts/tree/25028e7babaa5510c6a01ae379f2c12d27c42198/readmes%2Ffirebase%2Ffinagle.md)[_{{{CITATION{{{_10{](https://github.com/eed3si9n/eed3si9n.com/tree/783ccfb0381cfbec45f82e0a71e38a2afde87ed6/original%2Fdependency-resolution-semantics.ja.md)_{{{CITATION{{{_11{](https://github.com/bluepopo/myblog-notes/tree/9e52cc4b1b8fee40d1ee50c56fbca26c38d05add/3.Java%E6%A0%B8%E5%BF%83%2FSpring%E5%85%A8%E5%AE%B6%E6%A1%B6%2F%E3%80%90Spring%E3%80%91%E6%A1%86%E6%9E%B6%E6%80%BB%E7%BB%93.md)
+
+
+
+For kafka tpics, listen to message till end and keep listening till no message from last minute thn kill topology
+Sure! We can modify the Kafka Spout to stop the Storm topology when it detects no messages for a specified duration. We will use the System.nanoTime() method to track the time elapsed since the last message was received.
+
+1. Update Kafka Spout Class
+KafkaSpout.java
+java
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.storm.spout.SpoutOutputCollector;
+import org.apache.storm.task.TopologyContext;
+import org.apache.storm.topology.OutputFieldsDeclarer;
+import org.apache.storm.topology.base.BaseRichSpout;
+import org.apache.storm.tuple.Fields;
+import org.apache.storm.tuple.Values;
+
+import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+public class KafkaSpout extends BaseRichSpout {
+    private SpoutOutputCollector collector;
+    private KafkaConsumer<String, String> consumer;
+    private String[] topics;
+    private long lastMessageTime;
+    private static final long TIMEOUT_NANOS = TimeUnit.MINUTES.toNanos(1);
+
+    public KafkaSpout(String[] topics, KafkaConsumer<String, String> consumer) {
+        this.topics = topics;
+        this.consumer = consumer;
+    }
+
+    @Override
+    public void open(Map<String, Object> conf, TopologyContext context, SpoutOutputCollector collector) {
+        this.collector = collector;
+        consumer.subscribe(Arrays.asList(topics));
+        lastMessageTime = System.nanoTime();
+    }
+
+    @Override
+    public void nextTuple() {
+        ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
+        if (records.isEmpty()) {
+            if (System.nanoTime() - lastMessageTime > TIMEOUT_NANOS) {
+                // If no messages for the last minute, shutdown the topology
+                System.out.println("No messages for the last minute. Shutting down...");
+                Runtime.getRuntime().exit(0); // Exit the application
+            }
+        } else {
+            lastMessageTime = System.nanoTime();
+            for (ConsumerRecord<String, String> record : records) {
+                collector.emit(new Values(record.value()));
+            }
+        }
+    }
+
+    @Override
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        declarer.declare(new Fields("message"));
+    }
+
+    @Override
+    public void close() {
+        consumer.close();
+    }
+}
+2. Main Application Class
+Ensure the main class starts the topology and handles the producer or consumer functionality.
+
+Application.java
+java
+import org.apache.commons.cli.*;
+import org.apache.commons.configuration.PropertiesConfiguration;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.storm.Config;
+import org.apache.storm.LocalCluster;
+import org.apache.storm.StormSubmitter;
+import org.apache.storm.topology.TopologyBuilder;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.support.ClassPathXmlApplicationContext;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.Properties;
+
+public class Application {
+    public static void main(String[] args) throws Exception {
+        Options options = new Options();
+
+        options.addOption("mode", true, "Mode: producer, consumer");
+        options.addOption("bootstrapServers", true, "Kafka Bootstrap Servers");
+        options.addOption("topics", true, "Kafka Topics (comma-separated)");
+
+        CommandLineParser parser = new DefaultParser();
+        CommandLine cmd = parser.parse(options, args);
+
+        if (!cmd.hasOption("mode") || !cmd.hasOption("bootstrapServers") || !cmd.hasOption("topics")) {
+            HelpFormatter formatter = new HelpFormatter();
+            formatter.printHelp("Application", options);
+            return;
+        }
+
+        String mode = cmd.getOptionValue("mode");
+        String bootstrapServers = cmd.getOptionValue("bootstrapServers");
+        String topicsConfig = cmd.getOptionValue("topics");
+
+        // Load properties from file
+        PropertiesConfiguration config = new PropertiesConfiguration("server-config.properties");
+
+        // Override properties with command line options
+        config.setProperty("kafka.bootstrap.servers", bootstrapServers);
+        config.setProperty("kafka.topic.names", topicsConfig);
+
+        ApplicationContext context = new ClassPathXmlApplicationContext("spring-config.xml");
+
+        // Set properties for Spring beans
+        System.setProperty("kafka.bootstrap.servers", bootstrapServers);
+        System.setProperty("kafka.topic.names", topicsConfig);
+
+        // Start Storm topology
+        Properties consumerProps = context.getBean("kafkaConsumerProperties", Properties.class);
+        KafkaConsumer<String, String> consumer = context.getBean(KafkaConsumer.class);
+        KafkaSpout kafkaSpout = new KafkaSpout(topicsConfig.split(","), consumer);
+
+        TopologyBuilder builder = context.getBean(TopologyBuilder.class);
+        builder.setSpout("kafka-spout", kafkaSpout);
+        builder.setBolt("processing-bolt", context.getBean(MessageProcessingBolt.class)).shuffleGrouping("kafka-spout");
+
+        Config stormConfig = new Config();
+        stormConfig.setDebug(true);
+
+        String clusterMode = config.getString("storm.cluster.mode");
+
+        if ("remote".equalsIgnoreCase(clusterMode)) {
+            StormSubmitter.submitTopology("kafka-storm-topology", stormConfig, builder.createTopology());
+        } else {
+            LocalCluster cluster = new LocalCluster();
+            cluster.submitTopology("kafka-storm-topology", stormConfig, builder.createTopology());
+        }
+
+        // Run Kafka producer or consumer
+        if ("producer".equalsIgnoreCase(mode)) {
+            KafkaMessageProducer.produceMessages(bootstrapServers, topicsConfig);
+        } else if ("consumer".equalsIgnoreCase(mode)) {
+            KafkaMessageConsumer.consumeMessages(bootstrapServers, topicsConfig);
+        }
+    }
+}
+3. Maven POM File
+Ensure you have the required dependencies:
+
+pom.xml
+xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.example</groupId>
+    <artifactId>storm-kafka-integration</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+            <version>5.3.8</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.storm</groupId>
+            <artifactId>storm-core</artifactId>
+            <version>2.4.0</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-cli</groupId>
+            <artifactId>commons-cli</artifactId>
+            <version>1.4</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-configuration</groupId>
+            <artifactId>commons-configuration</artifactId>
+            <version>1.10</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.0</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.1.0</version>
+                <configuration>
+                    <descriptorRefs>
+                        <descriptorRef>jar-with-dependencies</descriptorRef>
+                    </descriptorRefs>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.example.Application</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>make-assembly</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+Build and Run the Application
+Build the project:
+
+bash
+mvn clean package
+Run the application with the desired mode, bootstrap servers, and topics:
+
+bash
+java -jar target/storm-kafka-integration-1.0-SNAPSHOT-jar-with-dependencies.jar -mode producer -bootstrapServers your_kafka_bootstrap_servers -topics topic1,topic2,topic3
+or
+
+bash
+java -jar target/storm-kafka-integration-1.0-SNAPSHOT-jar-with-dependencies.jar -mode consumer -bootstrapServers your_kafka_bootstrap_servers -topics topic1,topic2,topic3  
