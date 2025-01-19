@@ -1,0 +1,336 @@
+  src
+   └── com
+       └── example
+           ├── KafkaSpoutExample.java
+           ├── SimpleBolt.java
+           ├── KafkaTopicManager.java
+           ├── TimeoutBolt.java
+           ├── StormApp.java
+   resources
+   └── application-context.xml
+   pom.xml
+
+
+
+### Step-by-step full implementation:
+
+### 1. **Kafka Spout**
+
+The `KafkaSpout` reads messages from Kafka topics. It uses the `KafkaSpoutConfig` to configure the Kafka broker and topics.
+
+```java
+// KafkaSpoutExample.java
+
+package com.example;
+
+import org.apache.storm.kafka.spout.KafkaSpout;
+import org.apache.storm.kafka.spout.KafkaSpoutConfig;
+import org.apache.storm.topology.TopologyBuilder;
+import org.apache.storm.topology.StormTopology;
+import org.apache.storm.Config;
+
+import java.util.Map;
+import java.util.HashMap;
+
+public class KafkaSpoutExample {
+
+    public static StormTopology buildTopology(String topicName, String bootstrapServers) {
+        // Define Kafka consumer configuration
+        Map<String, Object> spoutConfig = new HashMap<>();
+        spoutConfig.put("metadata.broker.list", bootstrapServers);
+        spoutConfig.put("zookeeper.connect", "localhost:2181");
+
+        // Configure KafkaSpout
+        KafkaSpoutConfig kafkaSpoutConfig = KafkaSpoutConfig.builder(spoutConfig)
+            .setGroupId("storm-consumer-group")
+            .build();
+
+        KafkaSpout kafkaSpout = new KafkaSpout(kafkaSpoutConfig);
+
+        // Define a simple bolt to process the Kafka messages
+        SimpleBolt simpleBolt = new SimpleBolt();
+        
+        // Define topology
+        TopologyBuilder builder = new TopologyBuilder();
+        builder.setSpout("kafka-spout", kafkaSpout, 1);
+        builder.setBolt("simple-bolt", simpleBolt, 1).shuffleGrouping("kafka-spout");
+        
+        return builder.createTopology();
+    }
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 2) {
+            System.out.println("Usage: java KafkaSpoutExample <topic-name> <bootstrap-servers>");
+            System.exit(1);
+        }
+
+        String topicName = args[0];
+        String bootstrapServers = args[1];
+
+        // Create and submit topology
+        StormTopology topology = buildTopology(topicName, bootstrapServers);
+        Config config = new Config();
+        StormSubmitter.submitTopology("kafka-topology", config, topology);
+    }
+}
+```
+
+### 2. **Simple Bolt to Process Data**
+
+This is the bolt that will process messages consumed from Kafka. In this example, it simply prints the message.
+
+```java
+// SimpleBolt.java
+
+package com.example;
+
+import org.apache.storm.task.OutputCollector;
+import org.apache.storm.tuple.Tuple;
+import org.apache.storm.topology.base.BaseBasicBolt;
+
+public class SimpleBolt extends BaseBasicBolt {
+
+    @Override
+    public void execute(Tuple input, BasicOutputCollector collector) {
+        String kafkaMessage = input.getStringByField("message");
+        // Process the Kafka message here (example: print it)
+        System.out.println("Processed message: " + kafkaMessage);
+    }
+
+    @Override
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        // No output fields needed for this example
+    }
+}
+```
+
+### 3. **Kafka Topic Manager (Create, Modify, Delete Kafka Topics)**
+
+This utility class allows dynamic creation and deletion of Kafka topics.
+
+```java
+// KafkaTopicManager.java
+
+package com.example;
+
+import org.apache.kafka.clients.admin.*;
+import org.apache.kafka.common.KafkaFuture;
+
+import java.util.Collections;
+import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+
+public class KafkaTopicManager {
+
+    private AdminClient adminClient;
+
+    public KafkaTopicManager(String bootstrapServers) {
+        Properties config = new Properties();
+        config.put("bootstrap.servers", bootstrapServers);
+        this.adminClient = AdminClient.create(config);
+    }
+
+    // Create Kafka Topic
+    public void createTopic(String topicName, int partitions, short replicationFactor) throws ExecutionException, InterruptedException {
+        NewTopic newTopic = new NewTopic(topicName, partitions, replicationFactor);
+        adminClient.createTopics(Collections.singletonList(newTopic)).all().get();
+        System.out.println("Topic created: " + topicName);
+    }
+
+    // Delete Kafka Topic
+    public void deleteTopic(String topicName) throws ExecutionException, InterruptedException {
+        adminClient.deleteTopics(Collections.singletonList(topicName)).all().get();
+        System.out.println("Topic deleted: " + topicName);
+    }
+
+    public void close() {
+        adminClient.close();
+    }
+}
+```
+
+### 4. **Timeout Logic for 5 Minutes of Inactivity**
+
+We will use this logic to stop the topology if no events are received within 5 minutes.
+
+```java
+// TimeoutBolt.java
+
+package com.example;
+
+import org.apache.storm.topology.base.BaseBasicBolt;
+import org.apache.storm.tuple.Tuple;
+import org.apache.storm.task.OutputCollector;
+
+public class TimeoutBolt extends BaseBasicBolt {
+
+    private long lastEventTime = System.currentTimeMillis();
+    private static final long TIMEOUT_PERIOD = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+    @Override
+    public void execute(Tuple input, OutputCollector collector) {
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastEventTime > TIMEOUT_PERIOD) {
+            System.out.println("No events for 5 minutes, stopping topology.");
+            System.exit(0);  // Terminate the topology after timeout
+        }
+        lastEventTime = currentTime;
+
+        String kafkaMessage = input.getStringByField("message");
+        System.out.println("Processed message: " + kafkaMessage);
+    }
+
+    @Override
+    public void declareOutputFields(OutputFieldsDeclarer declarer) {
+        // No output fields needed for this example
+    }
+}
+```
+
+### 5. **Spring XML Configuration**
+
+Spring XML configuration for defining Kafka spouts, bolts, and topology.
+
+```xml
+<!-- application-context.xml -->
+
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+                           http://www.springframework.org/schema/beans/spring-beans-4.3.xsd">
+    
+    <!-- Kafka Spout Configuration -->
+    <bean id="kafkaSpout" class="org.apache.storm.kafka.spout.KafkaSpout">
+        <constructor-arg>
+            <bean class="org.apache.storm.kafka.spout.KafkaSpoutConfig">
+                <constructor-arg>
+                    <map>
+                        <entry key="metadata.broker.list" value="localhost:9092"/>
+                        <entry key="zookeeper.connect" value="localhost:2181"/>
+                    </map>
+                </constructor-arg>
+                <constructor-arg value="storm-consumer-group"/>
+            </bean>
+        </constructor-arg>
+    </bean>
+
+    <!-- Simple Bolt -->
+    <bean id="simpleBolt" class="com.example.SimpleBolt"/>
+
+    <!-- Timeout Bolt -->
+    <bean id="timeoutBolt" class="com.example.TimeoutBolt"/>
+
+    <!-- Topology Bean -->
+    <bean id="topology" class="com.example.KafkaSpoutExample" factory-method="buildTopology"/>
+    
+</beans>
+```
+
+### 6. **Command-line Arguments**
+
+To specify the topic name and Kafka server dynamically through the command line, you can handle the arguments like this:
+
+```java
+// StormApp.java
+
+package com.example;
+
+import org.apache.storm.Config;
+import org.apache.storm.topology.StormTopology;
+import org.apache.storm.StormSubmitter;
+
+public class StormApp {
+
+    public static void main(String[] args) throws Exception {
+        if (args.length < 2) {
+            System.out.println("Usage: StormApp <topic-name> <bootstrap-servers>");
+            System.exit(1);
+        }
+
+        String topicName = args[0];
+        String bootstrapServers = args[1];
+
+        // Create topology dynamically
+        StormTopology topology = KafkaSpoutExample.buildTopology(topicName, bootstrapServers);
+        
+        // Submit topology to Storm
+        Config config = new Config();
+        StormSubmitter.submitTopology("kafka-topology", config, topology);
+    }
+}
+```
+
+### 7. **Maven Dependencies**
+
+Make sure to add dependencies in your `pom.xml` file for Storm, Kafka, and Spring:
+
+xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>storm-kafka-topology</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <dependencies>
+        <!-- Apache Storm dependencies -->
+        <dependency>
+            <groupId>org.apache.storm</groupId>
+            <artifactId>storm-core</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+
+        <!-- Kafka dependencies -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>2.8.0</version>
+        </dependency>
+
+        <!-- Spring dependencies -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+            <version>5.3.8</version>
+        </dependency>
+
+        <!-- Other useful dependencies -->
+        <dependency>
+            <groupId>org.apache.storm</groupId>
+            <artifactId>storm-kafka-client</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+---
+
+### Running the Application:
+
+1. **Create Kafka Topics**: 
+    - Ensure Kafka topics exist or use `KafkaTopicManager` to create them.
+    
+2. **Submit the Storm Topology**: 
+    - Compile your Storm topology and run it via command-line:
+    ```bash
+    java -cp target/my-storm-topology.jar com.example.StormApp <topic-name> <bootstrap-servers>
+    ```
+
+
