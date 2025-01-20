@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+           http://www.springframework.org/schema/beans/spring-beans-4.3.xsd">
+
+    <!-- Kafka Configuration -->
+    <bean id="kafkaConsumerConfig" class="org.apache.kafka.clients.consumer.KafkaConsumer">
+        <constructor-arg>
+            <map>
+                <entry key="bootstrap.servers" value="localhost:9092"/>
+                <entry key="group.id" value="storm-consumer-group"/>
+                <entry key="key.deserializer" value="org.apache.kafka.common.serialization.StringDeserializer"/>
+                <entry key="value.deserializer" value="org.apache.kafka.common.serialization.StringDeserializer"/>
+                <entry key="auto.offset.reset" value="earliest"/>
+            </map>
+        </constructor-arg>
+    </bean>
+
+    <!-- Define the KafkaStormTopology bean with a parameterized constructor -->
+    <bean id="topology" class="com.example.storm.KafkaStormTopology">
+        <constructor-arg value="topic1"/> <!-- Pass the topic name here -->
+    </bean>
+
+</beans>
