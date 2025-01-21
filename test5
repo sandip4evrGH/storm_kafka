@@ -1,0 +1,51 @@
+import org.apache.storm.kafka.spout.KafkaSpout;
+import org.apache.storm.kafka.spout.KafkaSpoutConfig;
+import org.apache.storm.kafka.spout.KafkaSpoutConfig.Builder;
+import org.apache.storm.kafka.spout.internal.SpoutConfig;
+import org.apache.storm.kafka.spout.subscription.Subscription;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class KafkaSpoutConfigExample {
+
+    public static KafkaSpoutConfig<String, String> getKafkaSpoutConfig() {
+
+        // Kafka brokers list (comma-separated for multiple brokers)
+        String brokers = "localhost:9092";
+
+        // Kafka topic name from which the spout will consume messages
+        String topic = "my-topic";
+
+        // Consumer group ID (used by Kafka to track consumer offsets)
+        String consumerGroupId = "storm-consumer-group";
+
+        // Kafka properties configuration (e.g., consumer config)
+        Map<String, Object> kafkaProperties = new HashMap<>();
+        kafkaProperties.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
+        kafkaProperties.put(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId);
+        kafkaProperties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        kafkaProperties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+
+        // Create the KafkaSpoutConfig with the given properties
+        KafkaSpoutConfig<String, String> kafkaSpoutConfig = KafkaSpoutConfig.builder(brokers, topic)
+                .setProp(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers)
+                .setProp(ConsumerConfig.GROUP_ID_CONFIG, consumerGroupId)
+                .setProp(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer")
+                .setProp(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer")
+                .setOffsetCommitPeriodMs(5000) // Auto commit offset every 5 seconds
+                .setPollTimeoutMs(1000) // Kafka consumer poll timeout
+                .build();
+
+        return kafkaSpoutConfig;
+    }
+
+    public static void main(String[] args) {
+        // Call the method and configure Kafka Spout
+        KafkaSpoutConfig<String, String> config = getKafkaSpoutConfig();
+
+        // Print out the configuration (for debugging)
+        System.out.println("Kafka Spout Config: " + config);
+    }
+}
