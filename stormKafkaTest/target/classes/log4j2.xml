@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+
+    <!-- Appender configuration -->
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <!-- Console log layout (optional) -->
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level: %msg%n%throwable"/>
+        </Console>
+    </Appenders>
+
+    <!-- Loggers configuration -->
+    <Loggers>
+        <!-- Root logger configuration: Log only WARN and ERROR levels -->
+        <Root level="warn">
+            <AppenderRef ref="Console"/>
+        </Root>
+
+        <!-- You can define additional specific loggers for Storm (if needed) -->
+        <!-- Example for Storm logging -->
+        <Logger name="org.apache.storm" level="warn" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- Example for Kafka Spout (if you use it) -->
+        <Logger name="org.apache.storm.kafka" level="warn" additivity="false">
+            <AppenderRef ref="Console"/>
+        </Logger>
+
+        <!-- You can also specify specific loggers for bolts or spouts if needed -->
+    </Loggers>
+</Configuration>
