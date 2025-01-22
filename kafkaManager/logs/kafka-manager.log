@@ -1,0 +1,16 @@
+2025-01-21 17:35:20 ERROR com.kafka.KafkaManager - Error loading properties
+java.io.FileNotFoundException: application.properties (The system cannot find the file specified)
+	at java.io.FileInputStream.open0(Native Method) ~[?:1.8.0_302]
+	at java.io.FileInputStream.open(FileInputStream.java:195) ~[?:1.8.0_302]
+	at java.io.FileInputStream.<init>(FileInputStream.java:138) ~[?:1.8.0_302]
+	at java.io.FileInputStream.<init>(FileInputStream.java:93) ~[?:1.8.0_302]
+	at com.kafka.KafkaManager.<clinit>(KafkaManager.java:30) [classes/:?]
+2025-01-21 17:35:20 INFO  com.kafka.KafkaManager - Kafka Manager Utility started
+2025-01-21 20:40:34 ERROR com.kafka.KafkaManager - Error loading properties
+java.io.FileNotFoundException: application.properties (The system cannot find the file specified)
+	at java.io.FileInputStream.open0(Native Method) ~[?:1.8.0_302]
+	at java.io.FileInputStream.open(FileInputStream.java:195) ~[?:1.8.0_302]
+	at java.io.FileInputStream.<init>(FileInputStream.java:138) ~[?:1.8.0_302]
+	at java.io.FileInputStream.<init>(FileInputStream.java:93) ~[?:1.8.0_302]
+	at com.kafka.KafkaManager.<clinit>(KafkaManager.java:30) [classes/:?]
+2025-01-21 20:40:34 INFO  com.kafka.KafkaManager - Kafka Manager Utility started

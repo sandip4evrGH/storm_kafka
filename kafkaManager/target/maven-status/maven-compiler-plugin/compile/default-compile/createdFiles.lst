@@ -1,0 +1,3 @@
+com\kafka\KafkaConsumerService.class
+com\kafka\KafkaProducerService.class
+com\kafka\KafkaManager.class
