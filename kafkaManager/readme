@@ -1,10 +1,10 @@
 Running the Application:
 
 Producer Command Example:
-java -jar target/kafka-manager-1.0.0-jar-with-dependencies.jar -command producer -kafkaSource 192.168.2.200:9092 -produceFilePath /tmp/messages.txt -topic my-topic -avro
+java -cp target/your-jar-file.jar com.kafka.KafkaManager -config dev01.properties -command producer -produceFilePath /path/to/messages.txt
 
 Consumer Command Example:
-java -jar target/kafka-manager-1.0.0-jar-with-dependencies.jar -command consumer -kafkaSource 192.168.2.200:9092 -consumeFilePath /tmp/messages.txt -topic my-topic
+java -cp target/your-jar-file.jar com.kafka.KafkaManager -config dev01.properties -command consumer -isSaveFile true -saveFilePath /path/to/save/messages.zip
 
 Copy Command Example:
-java -jar target/kafka-manager-1.0.0-jar-with-dependencies.jar -command copy -kafkaSource
+java -cp target/your-jar-file.jar com.kafka.KafkaManager -config dev01.properties -command copy -sourceTopic source-topic-name -destinationTopic destination-topic-name
