@@ -5,8 +5,6 @@ import picocli.CommandLine.Command;
 
 import java.io.*;
 import java.util.Properties;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 @Command(name = "kafka-manager", mixinStandardHelpOptions = true, version = "1.0.0", description = "Kafka Manager CLI")
 public class KafkaManager implements Runnable {
@@ -36,7 +34,6 @@ public class KafkaManager implements Runnable {
 
     @Override
     public void run() {
-        // Load properties from the specified configuration file
         Properties properties = loadProperties(configFilePath);
 
         if (properties == null) {
@@ -44,7 +41,6 @@ public class KafkaManager implements Runnable {
             return;
         }
 
-        // Set values from the properties file
         kafkaServer = properties.getProperty("kafka.server");
         consumerGroupId = properties.getProperty("kafka.consumer.group.id");
         topic = properties.getProperty("kafka.topic");
@@ -52,22 +48,19 @@ public class KafkaManager implements Runnable {
         isAvro = Boolean.parseBoolean(properties.getProperty("avro", "false"));
         sourceTopic = properties.getProperty("sourceTopic");
         destinationTopic = properties.getProperty("destinationTopic");
-        saveFilePath = properties.getProperty("saveFilePath"); // Path where the ZIP file will be saved (if applicable)
+        saveFilePath = properties.getProperty("saveFilePath");
 
-        // Validate required properties for both producer and consumer
         if (kafkaServer == null || topic == null || consumerGroupId == null) {
             System.err.println("Error: Missing required properties (kafka.server, kafka.topic, or kafka.consumer.group.id).");
             return;
         }
 
-        // Run the selected command based on the provided command-line option
         switch (command.toLowerCase()) {
             case "producer":
                 if (produceFilePath == null) {
                     System.err.println("Error: Missing produceFilePath for producer.");
                     return;
                 }
-                // Validate the file path for producing messages
                 if (!isValidFilePath(produceFilePath)) {
                     System.err.println("Error: The file " + produceFilePath + " does not exist or is not a valid file.");
                     return;
@@ -79,7 +72,7 @@ public class KafkaManager implements Runnable {
                 break;
             case "copy":
                 if (sourceTopic != null && destinationTopic != null) {
-                    runCopy();  // Run the topic copy logic
+                    runCopy();
                 } else {
                     System.err.println("Error: Missing source or destination topic for copy.");
                 }
@@ -93,14 +86,11 @@ public class KafkaManager implements Runnable {
     private void runProducer() {
         KafkaProducerService producerService = new KafkaProducerService(kafkaServer, topic, isAvro);
         producerService.sendMessages(produceFilePath);
-        producerService.printTotalMessagesSent();
         producerService.close();
     }
 
     private void runConsumer() {
         KafkaConsumerService consumerService = new KafkaConsumerService(kafkaServer, topic, consumerGroupId, isAvro);
-
-        // Consume messages and optionally save to a file
         if (isSaveFile && saveFilePath != null) {
             try {
                 consumerService.consumeMessagesAndSaveToZip(saveFilePath);
@@ -110,28 +100,17 @@ public class KafkaManager implements Runnable {
         } else {
             consumerService.consumeMessages();
         }
-
-        consumerService.printTotalMessagesConsumed();
         consumerService.close();
     }
 
     private void runCopy() {
         KafkaConsumerService copyConsumerService = new KafkaConsumerService(kafkaServer, sourceTopic, consumerGroupId, isAvro);
         KafkaProducerService copyProducerService = new KafkaProducerService(kafkaServer, destinationTopic, isAvro);
-
-        // Consume from source topic and produce to destination topic
         copyConsumerService.consumeMessagesAndCopy(copyProducerService);
-
-        // Print the total number of events processed
-        copyConsumerService.printTotalMessagesConsumed();
-        copyProducerService.printTotalMessagesSent();
-
-        // Close both consumer and producer
         copyConsumerService.close();
         copyProducerService.close();
     }
 
-    // Helper method to load properties from a file
     private Properties loadProperties(String filePath) {
         Properties properties = new Properties();
         try (FileInputStream inputStream = new FileInputStream(filePath)) {
@@ -143,10 +122,8 @@ public class KafkaManager implements Runnable {
         return properties;
     }
 
-    // Helper method to check if the file exists and is a valid file
     private boolean isValidFilePath(String filePath) {
         File file = new File(filePath);
         return file.exists() && file.isFile();
     }
-
 }
