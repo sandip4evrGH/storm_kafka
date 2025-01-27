@@ -256,3 +256,244 @@ This implementation works seamlessly with **Kryo version 0.41** and Kafka.
         @Override
         public String toString() {
             return "MyEvent{name='" + name + "', timestamp=" + timestamp +
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+To deserialize the messages serialized using Kryo, you need to implement a corresponding deserialization utility. Below is the complete implementation with the deserialization class added:
+
+---
+
+### Updated Structure
+
+1. **Serialization Class**: Handles serialization of messages.
+2. **Deserialization Class**: Handles deserialization of messages.
+3. **Producer**: Sends serialized messages to Kafka.
+4. **Consumer**: Consumes messages from Kafka and deserializes them.
+
+---
+
+### 1. **KryoSerializer.java**
+This remains the same as previously defined:
+
+```java
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Output;
+
+import java.io.ByteArrayOutputStream;
+
+public class KryoSerializer {
+
+    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
+
+    public static byte[] serialize(Object object) {
+        Kryo kryo = kryoThreadLocal.get();
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        Output output = new Output(byteArrayOutputStream);
+        try {
+            kryo.writeObject(output, object);
+            output.close();
+            return byteArrayOutputStream.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Error serializing object with Kryo", e);
+        }
+    }
+}
+```
+
+---
+
+### 2. **KryoDeserializer.java**
+A new class to handle deserialization.
+
+```java
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Input;
+
+import java.io.ByteArrayInputStream;
+
+public class KryoDeserializer {
+
+    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
+
+    public static <T> T deserialize(byte[] bytes, Class<T> clazz) {
+        Kryo kryo = kryoThreadLocal.get();
+        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
+             Input input = new Input(byteArrayInputStream)) {
+            return kryo.readObject(input, clazz);
+        } catch (Exception e) {
+            throw new RuntimeException("Error deserializing object with Kryo", e);
+        }
+    }
+}
+```
+
+---
+
+### 3. **KafkaKryoProducer.java**
+The producer serializes and sends messages.
+
+```java
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import java.util.Properties;
+
+public class KafkaKryoProducer {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+        String bootstrapServers = "localhost:9092";
+
+        // Kafka producer configuration
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
+
+        // Create Kafka producer
+        KafkaProducer<String, byte[]> producer = new KafkaProducer<>(props);
+
+        try {
+            // Sample object to serialize
+            MyEvent event = new MyEvent("event1", System.currentTimeMillis());
+
+            // Serialize object using Kryo
+            byte[] serializedEvent = KryoSerializer.serialize(event);
+
+            // Send the serialized message to Kafka
+            ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, "key1", serializedEvent);
+            producer.send(record);
+
+            System.out.println("Message sent: " + event);
+        } finally {
+            producer.close();
+        }
+    }
+
+    // Example class for the event
+    public static class MyEvent {
+        private String name;
+        private long timestamp;
+
+        public MyEvent(String name, long timestamp) {
+            this.name = name;
+            this.timestamp = timestamp;
+        }
+
+        @Override
+        public String toString() {
+            return "MyEvent{name='" + name + "', timestamp=" + timestamp + '}';
+        }
+    }
+}
+```
+
+---
+
+### 4. **KafkaKryoConsumer.java**
+The consumer deserializes and prints the messages.
+
+```java
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Properties;
+
+public class KafkaKryoConsumer {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+        String bootstrapServers = "localhost:9092";
+        String groupId = "test-group";
+
+        // Kafka consumer configuration
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+        // Create Kafka consumer
+        KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic));
+
+        try {
+            while (true) {
+                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(1000));
+                for (ConsumerRecord<String, byte[]> record : records) {
+                    // Deserialize the message
+                    MyEvent event = KryoDeserializer.deserialize(record.value(), MyEvent.class);
+                    System.out.println("Received message: " + event);
+                }
+            }
+        } finally {
+            consumer.close();
+        }
+    }
+
+    // Same class as in the producer
+    public static class MyEvent {
+        private String name;
+        private long timestamp;
+
+        public MyEvent(String name, long timestamp) {
+            this.name = name;
+            this.timestamp = timestamp;
+        }
+
+        @Override
+        public String toString() {
+            return "MyEvent{name='" + name + "', timestamp=" + timestamp + '}';
+        }
+    }
+}
+```
+
+---
+
+### 5. Run Instructions
+
+1. **Start Kafka**: Ensure your Kafka broker is running.
+2. **Run Producer**: Send serialized messages.
+   ```bash
+   java -cp target/my-app.jar com.example.KafkaKryoProducer
+   ```
+3. **Run Consumer**: Consume and deserialize messages.
+   ```bash
+   java -cp target/my-app.jar com.example.KafkaKryoConsumer
+   ```
+
+---
+
+### Example Output
+**Producer**:
+```
+Message sent: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+**Consumer**:
+```
+Received message: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+This ensures seamless serialization and deserialization using **Kryo version 0.41** with Kafka.
