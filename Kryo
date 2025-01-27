@@ -91,6 +91,152 @@ public class KafkaKryoProducer {
             ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, "key1", serializedEvent);
             producer.send(record);
 
+
+
+
+
+
+
+
+To use Kryo version `0.4.1`, you need to adjust the dependency and ensure your code is compatible with the older API of Kryo. Here’s how you can modify your Kafka producer to serialize messages using **Kryo 0.4.1**:
+
+---
+
+### 1. Update Maven Dependency
+Include the specific version of Kryo in your `pom.xml`:
+
+```xml
+<dependencies>
+    <!-- Kafka Client -->
+    <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>kafka-clients</artifactId>
+        <version>1.1.0</version>
+    </dependency>
+
+    <!-- Kryo -->
+    <dependency>
+        <groupId>de.javakaffee</groupId>
+        <artifactId>kryo-serializers</artifactId>
+        <version>0.41</version>
+    </dependency>
+</dependencies>
+```
+
+---
+
+### 2. Kryo Serializer for Version 0.41
+Adjust the serialization logic to use the older API of Kryo. Below is the implementation:
+
+```java
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Output;
+
+import java.io.ByteArrayOutputStream;
+
+public class KryoSerializer {
+
+    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
+
+    public static byte[] serialize(Object object) {
+        Kryo kryo = kryoThreadLocal.get();
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        Output output = new Output(byteArrayOutputStream);
+        try {
+            kryo.writeObject(output, object);
+            output.close();
+            return byteArrayOutputStream.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Error serializing object with Kryo", e);
+        }
+    }
+}
+```
+
+---
+
+### 3. Kafka Producer
+Modify the Kafka producer to use the Kryo serializer.
+
+```java
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import java.util.Properties;
+
+public class KafkaKryoProducer {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+        String bootstrapServers = "localhost:9092";
+
+        // Kafka producer configuration
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
+
+        // Create Kafka producer
+        KafkaProducer<String, byte[]> producer = new KafkaProducer<>(props);
+
+        try {
+            // Sample object to serialize
+            MyEvent event = new MyEvent("event1", System.currentTimeMillis());
+
+            // Serialize object using Kryo
+            byte[] serializedEvent = KryoSerializer.serialize(event);
+
+            // Send the serialized message to Kafka
+            ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, "key1", serializedEvent);
+            producer.send(record);
+
+            System.out.println("Message sent: " + event);
+        } finally {
+            producer.close();
+        }
+    }
+
+    // Example class for the event
+    public static class MyEvent {
+        private String name;
+        private long timestamp;
+
+        public MyEvent(String name, long timestamp) {
+            this.name = name;
+            this.timestamp = timestamp;
+        }
+
+        @Override
+        public String toString() {
+            return "MyEvent{name='" + name + "', timestamp=" + timestamp + '}';
+        }
+    }
+}
+```
+
+---
+
+### 4. Run the Kafka Producer
+1. Make sure Kafka is running on your system.
+2. Compile and run the producer:
+   ```bash
+   mvn clean package
+   java -cp target/my-app.jar com.example.KafkaKryoProducer
+   ```
+
+---
+
+### Notes
+- **Deserialization:** To deserialize the message, you need to use a corresponding `KryoDeserializer` with the same Kryo version and registration logic.
+- **Registration (Optional):** For better performance, you can register classes with Kryo to assign them specific IDs:
+  ```java
+  kryo.register(MyEvent.class, new Kryo.DefaultSerializer());
+  ```
+- Ensure compatibility between producer and consumer to avoid serialization/deserialization issues.
+
+This implementation works seamlessly with **Kryo version 0.41** and Kafka.
+
             System.out.println("Message sent: " + event);
         } finally {
             producer.close();
