@@ -1,0 +1,155 @@
+To deserialize a message without providing the event class, you can use Kryo's `readClassAndObject` method. This method allows Kryo to infer the class type at runtime by including class metadata in the serialized message. Here's how you can implement it:
+
+---
+
+### Updated **KryoDeserializer** with Generic Method
+This version includes a method to deserialize without specifying the event class explicitly:
+
+```java
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Input;
+
+import java.io.ByteArrayInputStream;
+
+public class KryoDeserializer {
+
+    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
+
+    /**
+     * Deserialize a byte array to a specific class type.
+     * 
+     * @param bytes The byte array to deserialize.
+     * @param clazz The class type to deserialize to.
+     * @param <T>   The type of the object.
+     * @return The deserialized object.
+     */
+    public static <T> T deserialize(byte[] bytes, Class<T> clazz) {
+        Kryo kryo = kryoThreadLocal.get();
+        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
+             Input input = new Input(byteArrayInputStream)) {
+            return kryo.readObject(input, clazz);
+        } catch (Exception e) {
+            throw new RuntimeException("Error deserializing object with Kryo", e);
+        }
+    }
+
+    /**
+     * Deserialize a byte array without providing a specific class type.
+     * 
+     * @param bytes The byte array to deserialize.
+     * @return The deserialized object.
+     */
+    public static Object deserializeWithoutClass(byte[] bytes) {
+        Kryo kryo = kryoThreadLocal.get();
+        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
+             Input input = new Input(byteArrayInputStream)) {
+            return kryo.readClassAndObject(input);
+        } catch (Exception e) {
+            throw new RuntimeException("Error deserializing object with Kryo", e);
+        }
+    }
+}
+```
+
+---
+
+### Producer Update
+When serializing the object, include its class information using `writeClassAndObject`:
+
+```java
+import com.esotericsoftware.kryo.io.Output;
+import java.io.ByteArrayOutputStream;
+
+public class KryoSerializer {
+
+    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
+
+    public static byte[] serialize(Object object) {
+        Kryo kryo = kryoThreadLocal.get();
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        Output output = new Output(byteArrayOutputStream);
+        try {
+            kryo.writeClassAndObject(output, object);
+            output.close();
+            return byteArrayOutputStream.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Error serializing object with Kryo", e);
+        }
+    }
+}
+```
+
+---
+
+### Consumer Update
+Use the `deserializeWithoutClass` method to infer the object type at runtime.
+
+```java
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Properties;
+
+public class KafkaKryoConsumerWithoutClass {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+        String groupId = "test-group";
+
+        // Kafka consumer configuration
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "<broker-hostname>:9093");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put("security.protocol", "SASL_SSL");
+        props.put("sasl.mechanism", "PLAIN");
+        props.put("ssl.truststore.location", "/path/to/truststore.jks");
+        props.put("ssl.truststore.password", "your_truststore_password");
+
+        // Create Kafka consumer
+        KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic));
+
+        try {
+            while (true) {
+                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(1000));
+                for (ConsumerRecord<String, byte[]> record : records) {
+                    // Deserialize the message without providing a specific class
+                    Object event = KryoDeserializer.deserializeWithoutClass(record.value());
+                    System.out.println("Received message: " + event);
+                }
+            }
+        } finally {
+            consumer.close();
+        }
+    }
+}
+```
+
+---
+
+### Output
+Assume you sent the following event via the producer:
+```java
+MyEvent event = new MyEvent("event1", System.currentTimeMillis());
+```
+
+**Producer Output**:
+```
+Message sent: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+**Consumer Output**:
+```
+Received message: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+### Key Benefits
+- Using `readClassAndObject` removes the need to specify the class explicitly during deserialization.
+- This approach is useful when the consumer doesn't know the exact type of the messages ahead of time.
