@@ -497,3 +497,232 @@ Received message: MyEvent{name='event1', timestamp=1706367334468}
 ```
 
 This ensures seamless serialization and deserialization using **Kryo version 0.41** with Kafka.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+To enable **SASL_SSL** for both the producer and consumer in Kafka, you need to configure the necessary security properties. Below is the updated implementation for both the producer and consumer to use SASL_SSL authentication.
+
+---
+
+### Prerequisites
+
+1. Ensure that your Kafka broker is configured for SASL_SSL.
+   - Set up `server.properties` on your Kafka broker with SASL_SSL enabled.
+   - Example configuration in `server.properties`:
+     ```properties
+     security.inter.broker.protocol=SASL_SSL
+     sasl.mechanism.inter.broker.protocol=PLAIN
+     listeners=SASL_SSL://:9093
+     advertised.listeners=SASL_SSL://<broker-hostname>:9093
+     listener.security.protocol.map=SASL_SSL:SASL_SSL
+     ssl.keystore.location=/path/to/keystore.jks
+     ssl.keystore.password=your_keystore_password
+     ssl.key.password=your_key_password
+     ssl.truststore.location=/path/to/truststore.jks
+     ssl.truststore.password=your_truststore_password
+     sasl.enabled.mechanisms=PLAIN
+     ```
+
+2. Create a JAAS configuration file (e.g., `kafka_client_jaas.conf`):
+   ```plaintext
+   KafkaClient {
+       org.apache.kafka.common.security.plain.PlainLoginModule required
+       username="your-username"
+       password="your-password";
+   };
+   ```
+
+3. Provide the path to the JAAS configuration file in the JVM options when running the producer and consumer.
+
+---
+
+### 1. SASL_SSL Properties for Producer and Consumer
+
+Add the following properties to the Kafka producer and consumer configurations:
+
+```java
+Properties props = new Properties();
+props.put("bootstrap.servers", "<broker-hostname>:9093"); // Replace with your broker's hostname and port
+props.put("security.protocol", "SASL_SSL");
+props.put("sasl.mechanism", "PLAIN");
+props.put("ssl.truststore.location", "/path/to/truststore.jks"); // Replace with your truststore path
+props.put("ssl.truststore.password", "your_truststore_password");
+props.put("ssl.keystore.location", "/path/to/keystore.jks"); // Optional for mutual TLS
+props.put("ssl.keystore.password", "your_keystore_password");
+props.put("ssl.key.password", "your_key_password"); // Optional for mutual TLS
+```
+
+---
+
+### 2. Updated Kafka Producer with SASL_SSL
+
+```java
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import java.util.Properties;
+
+public class KafkaKryoProducerSASL {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+
+        // Kafka producer configuration with SASL_SSL
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "<broker-hostname>:9093");
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArraySerializer");
+        props.put("security.protocol", "SASL_SSL");
+        props.put("sasl.mechanism", "PLAIN");
+        props.put("ssl.truststore.location", "/path/to/truststore.jks");
+        props.put("ssl.truststore.password", "your_truststore_password");
+
+        // Create Kafka producer
+        KafkaProducer<String, byte[]> producer = new KafkaProducer<>(props);
+
+        try {
+            // Sample object to serialize
+            MyEvent event = new MyEvent("event1", System.currentTimeMillis());
+
+            // Serialize object using Kryo
+            byte[] serializedEvent = KryoSerializer.serialize(event);
+
+            // Send the serialized message to Kafka
+            ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, "key1", serializedEvent);
+            producer.send(record);
+
+            System.out.println("Message sent: " + event);
+        } finally {
+            producer.close();
+        }
+    }
+
+    // Event class
+    public static class MyEvent {
+        private String name;
+        private long timestamp;
+
+        public MyEvent(String name, long timestamp) {
+            this.name = name;
+            this.timestamp = timestamp;
+        }
+
+        @Override
+        public String toString() {
+            return "MyEvent{name='" + name + "', timestamp=" + timestamp + '}';
+        }
+    }
+}
+```
+
+---
+
+### 3. Updated Kafka Consumer with SASL_SSL
+
+```java
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+
+import java.time.Duration;
+import java.util.Collections;
+import java.util.Properties;
+
+public class KafkaKryoConsumerSASL {
+
+    public static void main(String[] args) {
+        String topic = "test-topic";
+        String groupId = "test-group";
+
+        // Kafka consumer configuration with SASL_SSL
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "<broker-hostname>:9093");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put("security.protocol", "SASL_SSL");
+        props.put("sasl.mechanism", "PLAIN");
+        props.put("ssl.truststore.location", "/path/to/truststore.jks");
+        props.put("ssl.truststore.password", "your_truststore_password");
+
+        // Create Kafka consumer
+        KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic));
+
+        try {
+            while (true) {
+                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(1000));
+                for (ConsumerRecord<String, byte[]> record : records) {
+                    // Deserialize the message
+                    MyEvent event = KryoDeserializer.deserialize(record.value(), MyEvent.class);
+                    System.out.println("Received message: " + event);
+                }
+            }
+        } finally {
+            consumer.close();
+        }
+    }
+
+    // Event class (same as producer)
+    public static class MyEvent {
+        private String name;
+        private long timestamp;
+
+        public MyEvent(String name, long timestamp) {
+            this.name = name;
+            this.timestamp = timestamp;
+        }
+
+        @Override
+        public String toString() {
+            return "MyEvent{name='" + name + "', timestamp=" + timestamp + '}';
+        }
+    }
+}
+```
+
+---
+
+### 4. Set JVM Options for JAAS File
+
+Provide the path to the JAAS file in JVM options:
+
+```bash
+-Djava.security.auth.login.config=/path/to/kafka_client_jaas.conf
+```
+
+Example:
+```bash
+java -Djava.security.auth.login.config=/path/to/kafka_client_jaas.conf -cp target/my-app.jar com.example.KafkaKryoProducerSASL
+java -Djava.security.auth.login.config=/path/to/kafka_client_jaas.conf -cp target/my-app.jar com.example.KafkaKryoConsumerSASL
+```
+
+---
+
+### Example Output
+**Producer**:
+```
+Message sent: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+**Consumer**:
+```
+Received message: MyEvent{name='event1', timestamp=1706367334468}
+```
+
+This implementation ensures secure communication with Kafka using **SASL_SSL**.
