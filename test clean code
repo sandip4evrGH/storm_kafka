@@ -1,0 +1,371 @@
+Below is the full code for your project, including the `pom.xml`, Java classes, and file generation logic. You can copy this entire structure into your project.
+
+---
+
+### 1. **Maven `pom.xml`**
+
+This is the Maven configuration file for your project with the required dependencies for Kryo, Kafka, and AES encryption.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>kafka-eventhub</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!-- Kryo -->
+        <dependency>
+            <groupId>com.esotericsoftware.kryo</groupId>
+            <artifactId>kryo</artifactId>
+            <version>5.2.0</version>
+        </dependency>
+        
+        <!-- Apache Kafka -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+        
+        <!-- JCE (for AES encryption) -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-crypto</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+---
+
+### 2. **Java Classes**
+
+Create the following Java classes in your Maven project. Ensure that you have the directory structure set up correctly, such as `src/main/java/com/example/kafka`.
+
+#### **RandomDataGenerator.java** (Create a file with random data)
+
+```java
+package com.example.kafka;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.Random;
+
+public class RandomDataGenerator {
+
+    // Method to generate a file with 100 lines of random text
+    public static void generateRandomFile(String filePath, int numLines) throws IOException {
+        FileWriter writer = new FileWriter(filePath);
+        Random random = new Random();
+
+        for (int i = 0; i < numLines; i++) {
+            String line = generateRandomLine(random);
+            writer.write(line + "\n");
+        }
+
+        writer.close();
+    }
+
+    // Helper method to generate a random line of text
+    private static String generateRandomLine(Random random) {
+        int length = 10 + random.nextInt(15); // Random line length between 10 and 25 characters
+        StringBuilder line = new StringBuilder(length);
+
+        for (int i = 0; i < length; i++) {
+            char randomChar = (char) ('a' + random.nextInt(26)); // Generate random letter (a-z)
+            line.append(randomChar);
+        }
+
+        return line.toString();
+    }
+
+    public static void main(String[] args) {
+        try {
+            // Generate the file with random data
+            generateRandomFile("random_data.txt", 100);
+            System.out.println("File generated with random data: random_data.txt");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+#### **AESUtils.java** (AES Encryption and Decryption Utility)
+
+```java
+package com.example.kafka;
+
+import org.apache.commons.crypto.cipher.CryptoCipher;
+import org.apache.commons.crypto.utils.CryptoUtils;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.NoSuchAlgorithmException;
+
+public class AESUtils {
+
+    // AES encryption algorithm
+    private static final String ALGORITHM = "AES";
+    
+    // Generate AES key (128 bits)
+    public static SecretKey generateKey() throws NoSuchAlgorithmException {
+        KeyGenerator keyGenerator = KeyGenerator.getInstance(ALGORITHM);
+        keyGenerator.init(128); // 128-bit AES key
+        return keyGenerator.generateKey();
+    }
+
+    // Encrypt data using AES
+    public static byte[] encrypt(byte[] data, SecretKey secretKey) throws Exception {
+        CryptoCipher cipher = CryptoUtils.getCipherInstance(ALGORITHM);
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+        
+        try (ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            try (ByteArrayInputStream inputStream = new ByteArrayInputStream(data)) {
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    cipher.update(buffer, 0, bytesRead);
+                }
+                byteArrayOutputStream.write(cipher.doFinal());
+            }
+            return byteArrayOutputStream.toByteArray();
+        }
+    }
+
+    // Decrypt data using AES
+    public static byte[] decrypt(byte[] encryptedData, SecretKey secretKey) throws Exception {
+        CryptoCipher cipher = CryptoUtils.getCipherInstance(ALGORITHM);
+        cipher.init(Cipher.DECRYPT_MODE, secretKey);
+        
+        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(encryptedData);
+             ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            while ((bytesRead = byteArrayInputStream.read(buffer)) != -1) {
+                cipher.update(buffer, 0, bytesRead);
+            }
+            byteArrayOutputStream.write(cipher.doFinal());
+            return byteArrayOutputStream.toByteArray();
+        }
+    }
+}
+```
+
+#### **KryoSerializer.java** (Kryo Serializer)
+
+```java
+package com.example.kafka;
+
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Output;
+import com.esotericsoftware.kryo.io.Input;
+import org.apache.kafka.common.serialization.Serializer;
+
+import java.util.Map;
+
+public class KryoSerializer<T> implements Serializer<T> {
+
+    private Kryo kryo;
+
+    @Override
+    public void configure(Map<String, ?> configs, boolean isKey) {
+        kryo = new Kryo();
+    }
+
+    @Override
+    public byte[] serialize(String topic, T data) {
+        try (Output output = new Output(1024)) {
+            kryo.writeClassAndObject(output, data);
+            return output.toBytes();
+        }
+    }
+
+    @Override
+    public void close() {
+    }
+}
+```
+
+#### **KryoDeserializer.java** (Kryo Deserializer)
+
+```java
+package com.example.kafka;
+
+import com.esotericsoftware.kryo.Kryo;
+import com.esotericsoftware.kryo.io.Input;
+import org.apache.kafka.common.serialization.Deserializer;
+
+import java.util.Map;
+
+public class KryoDeserializer<T> implements Deserializer<T> {
+
+    private Kryo kryo;
+
+    @Override
+    public void configure(Map<String, ?> configs, boolean isKey) {
+        kryo = new Kryo();
+    }
+
+    @Override
+    public T deserialize(String topic, byte[] data) {
+        try (Input input = new Input(data)) {
+            return (T) kryo.readClassAndObject(input);
+        }
+    }
+
+    @Override
+    public void close() {
+    }
+}
+```
+
+#### **ConfigLoader.java** (Configuration Loader)
+
+```java
+package com.example.kafka;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+public class ConfigLoader {
+
+    private Properties properties;
+
+    public ConfigLoader(String configFilePath) throws IOException {
+        properties = new Properties();
+        try (FileInputStream fis = new FileInputStream(configFilePath)) {
+            properties.load(fis);
+        }
+    }
+
+    public Properties getAllProperties() {
+        return properties;
+    }
+}
+```
+
+#### **EventHubKafkaProducer.java** (Kafka Producer)
+
+```java
+package com.example.kafka;
+
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import javax.crypto.SecretKey;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Properties;
+
+public class EventHubKafkaProducer {
+
+    public static void main(String[] args) {
+        try {
+            // Load configuration properties
+            ConfigLoader configLoader = new ConfigLoader("dev1.properties");
+            Properties producerProperties = configLoader.getAllProperties();
+
+            // Generate AES Key
+            SecretKey secretKey = AESUtils.generateKey();
+
+            // Read the file content into a String (using the random data file created)
+            String filePath = "random_data.txt";
+            String message = new String(Files.readAllBytes(Paths.get(filePath)));
+
+            // Serialize the payload using Kryo
+            KryoSerializer<String> kryoSerializer = new KryoSerializer<>();
+            byte[] serializedData = kryoSerializer.serialize("testTopic", message);
+
+            // Encrypt the serialized data using AES
+            byte[] encryptedData = AESUtils.encrypt(serializedData, secretKey);
+
+            // Set up producer properties
+            producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, KryoSerializer.class.getName());
+            producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KryoSerializer.class.getName());
+
+            // Initialize Kafka producer
+            KafkaProducer<String, byte[]> producer = new KafkaProducer<>(producerProperties);
+
+            // Define the topic
+            String topicName = producerProperties.getProperty("your.topic.name");
+
+            // Send the encrypted payload
+            producer.send(new ProducerRecord<>(topicName, "key", encryptedData));
+            System.out.println("Encrypted message sent to Event Hub");
+
+            // Close the producer
+            producer.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+```
+
+### 3. **dev1.properties** (Kafka Properties File)
+
+This file contains the Kafka configuration and
+
+ connection information. Create a file called `dev1.properties`.
+
+```properties
+eventhub.connection.string=your_eventhub_connection_string
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="$ConnectionString" password="your_eventhub_connection_string";
+group.id=your_consumer_group_id
+key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+your.topic.name=your_topic_name
+```
+
+---
+
+### 4. **Run the Application**
+
+1. **Generate the Random Data File**: 
+   First, run `RandomDataGenerator.java` to generate the `random_data.txt` file with random data.
+
+2. **Run the Kafka Producer**: 
+   Run `EventHubKafkaProducer.java` to send the encrypted message to the Kafka topic.
+
+---
+
+With this setup, you can run the project by following these steps:
+1. Compile the project with Maven:
+   ```bash
+   mvn clean install
+   ```
+2. Run the `RandomDataGenerator` to create the `random_data.txt` file.
+3. Run the `EventHubKafkaProducer` to send the data to Kafka.
+
+This should now cover the full project setup, with everything managed using Maven.
