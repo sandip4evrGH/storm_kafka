@@ -1,155 +1,154 @@
-To deserialize a message without providing the event class, you can use Kryo's `readClassAndObject` method. This method allows Kryo to infer the class type at runtime by including class metadata in the serialized message. Here's how you can implement it:
+To keep the SASL configuration in a properties file (`dev1.properties`) and have it applied for both the Kafka producer and consumer with the necessary topic configuration, you can follow these steps.
 
----
+### Step 1: Create the `dev1.properties` file
 
-### Updated **KryoDeserializer** with Generic Method
-This version includes a method to deserialize without specifying the event class explicitly:
+You will store the SASL/OAUTHBEARER configuration and other related settings (like `bootstrap.servers` and topic-specific settings) in the `dev1.properties` file.
 
-```java
-import com.esotericsoftware.kryo.Kryo;
-import com.esotericsoftware.kryo.io.Input;
+#### Example `dev1.properties`:
+```properties
+# Kafka broker and security configuration
+bootstrap.servers=your_broker_url
+security.protocol=SASL_SSL
+sasl.mechanism=OAUTHBEARER
+sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+    oauth.access.token.endpoint.uri="https://your-oauth-provider/token"; \
+    oauth.client.id="your-client-id"; oauth.client.secret="your-client-secret";
 
-import java.io.ByteArrayInputStream;
-
-public class KryoDeserializer {
-
-    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
-
-    /**
-     * Deserialize a byte array to a specific class type.
-     * 
-     * @param bytes The byte array to deserialize.
-     * @param clazz The class type to deserialize to.
-     * @param <T>   The type of the object.
-     * @return The deserialized object.
-     */
-    public static <T> T deserialize(byte[] bytes, Class<T> clazz) {
-        Kryo kryo = kryoThreadLocal.get();
-        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
-             Input input = new Input(byteArrayInputStream)) {
-            return kryo.readObject(input, clazz);
-        } catch (Exception e) {
-            throw new RuntimeException("Error deserializing object with Kryo", e);
-        }
-    }
-
-    /**
-     * Deserialize a byte array without providing a specific class type.
-     * 
-     * @param bytes The byte array to deserialize.
-     * @return The deserialized object.
-     */
-    public static Object deserializeWithoutClass(byte[] bytes) {
-        Kryo kryo = kryoThreadLocal.get();
-        try (ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(bytes);
-             Input input = new Input(byteArrayInputStream)) {
-            return kryo.readClassAndObject(input);
-        } catch (Exception e) {
-            throw new RuntimeException("Error deserializing object with Kryo", e);
-        }
-    }
-}
+# Topic-specific configurations (example)
+your.topic.name=some_topic
+group.id=your-consumer-group
 ```
 
----
+### Step 2: Load and Use Properties in Kafka Producer and Consumer
 
-### Producer Update
-When serializing the object, include its class information using `writeClassAndObject`:
+You can now load the `dev1.properties` file dynamically and use the values in both your Kafka producer and consumer.
 
-```java
-import com.esotericsoftware.kryo.io.Output;
-import java.io.ByteArrayOutputStream;
-
-public class KryoSerializer {
-
-    private static final ThreadLocal<Kryo> kryoThreadLocal = ThreadLocal.withInitial(Kryo::new);
-
-    public static byte[] serialize(Object object) {
-        Kryo kryo = kryoThreadLocal.get();
-        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-        Output output = new Output(byteArrayOutputStream);
-        try {
-            kryo.writeClassAndObject(output, object);
-            output.close();
-            return byteArrayOutputStream.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException("Error serializing object with Kryo", e);
-        }
-    }
-}
-```
-
----
-
-### Consumer Update
-Use the `deserializeWithoutClass` method to infer the object type at runtime.
+#### 1. **Producer Configuration**:
 
 ```java
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.serialization.StringSerializer;
 
-import java.time.Duration;
-import java.util.Collections;
+import java.io.FileInputStream;
+import java.io.IOException;
 import java.util.Properties;
 
-public class KafkaKryoConsumerWithoutClass {
+public class OAuthBearerProducer {
+    public static void main(String[] args) throws IOException {
+        Properties producerProperties = new Properties();
+        
+        // Load the properties file
+        try (FileInputStream fis = new FileInputStream("dev1.properties")) {
+            producerProperties.load(fis);
+        }
 
-    public static void main(String[] args) {
-        String topic = "test-topic";
-        String groupId = "test-group";
+        // Create the Kafka producer configuration
+        producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
 
-        // Kafka consumer configuration
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "<broker-hostname>:9093");
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.ByteArrayDeserializer");
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put("security.protocol", "SASL_SSL");
-        props.put("sasl.mechanism", "PLAIN");
-        props.put("ssl.truststore.location", "/path/to/truststore.jks");
-        props.put("ssl.truststore.password", "your_truststore_password");
+        // Initialize producer
+        KafkaProducer<String, String> producer = new KafkaProducer<>(producerProperties);
 
-        // Create Kafka consumer
-        KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props);
-        consumer.subscribe(Collections.singletonList(topic));
+        // Example: Sending a message to the topic specified in the properties file
+        String topicName = producerProperties.getProperty("your.topic.name");  // Fetch topic from properties file
+        producer.send(new ProducerRecord<>(topicName, "key", "value"));
+        
+        // Close producer
+        producer.close();
+    }
+}
+```
 
-        try {
-            while (true) {
-                ConsumerRecords<String, byte[]> records = consumer.poll(Duration.ofMillis(1000));
-                for (ConsumerRecord<String, byte[]> record : records) {
-                    // Deserialize the message without providing a specific class
-                    Object event = KryoDeserializer.deserializeWithoutClass(record.value());
-                    System.out.println("Received message: " + event);
-                }
+#### 2. **Consumer Configuration**:
+
+```java
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+import java.util.List;
+
+public class OAuthBearerConsumer {
+    public static void main(String[] args) throws IOException {
+        Properties consumerProperties = new Properties();
+        
+        // Load the properties file
+        try (FileInputStream fis = new FileInputStream("dev1.properties")) {
+            consumerProperties.load(fis);
+        }
+
+        // Create the Kafka consumer configuration
+        consumerProperties.put("key.deserializer", StringDeserializer.class.getName());
+        consumerProperties.put("value.deserializer", StringDeserializer.class.getName());
+
+        // Fetch the topic and group id from the properties file
+        String topicName = consumerProperties.getProperty("your.topic.name");
+        String groupId = consumerProperties.getProperty("group.id");
+
+        // Set the group ID for the consumer
+        consumerProperties.put("group.id", groupId);
+
+        // Initialize consumer
+        KafkaConsumer<String, String> consumer = new KafkaConsumer<>(consumerProperties);
+
+        // Subscribe to the topic
+        consumer.subscribe(List.of(topicName));
+
+        // Poll for messages
+        while (true) {
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
+            for (ConsumerRecord<String, String> record : records) {
+                System.out.println("Received record: " + record.value());
             }
-        } finally {
-            consumer.close();
         }
     }
 }
 ```
 
----
+### Step 3: Explanation
 
-### Output
-Assume you sent the following event via the producer:
-```java
-MyEvent event = new MyEvent("event1", System.currentTimeMillis());
+1. **Property File (`dev1.properties`)**:
+   - Contains configuration for both the **SASL/OAUTHBEARER** authentication mechanism and other Kafka-specific settings like `bootstrap.servers`, `security.protocol`, and `group.id`.
+   - Topic names and other custom configurations (like `your.topic.name`) can also be included in the same file.
+
+2. **Loading Properties**:
+   - In both the producer and consumer code, the properties file is loaded using `FileInputStream`, which reads the configuration values and applies them to Kafka producer/consumer settings.
+   - The `your.topic.name` property from the file is used to dynamically choose which topic to send/consume messages from.
+
+3. **Producer and Consumer**:
+   - **Producer**: The producer loads the `dev1.properties` file, uses the topic name defined in the properties file, and sends messages.
+   - **Consumer**: The consumer loads the same properties and uses the `group.id` and `topic.name` specified in the properties file to join the right Kafka consumer group and listen to the correct topic.
+
+### Step 4: Running the Producer and Consumer
+
+1. Place the `dev1.properties` file in the correct path (e.g., in your project directory, or specify the full path in the code).
+2. Run the producer and consumer as needed.
+
+This approach centralizes your Kafka and SASL/OAUTHBEARER configuration into a properties file, making it easier to manage and update across different environments (dev, prod, etc.) without hardcoding the values into the application code.
+
+### Step 5: Example Folder Structure
+
+Your project directory might look something like this:
+
+```
+your-project/
+│
+├── src/
+│   ├── main/
+│   │   ├── java/
+│   │   │   ├── OAuthBearerProducer.java
+│   │   │   └── OAuthBearerConsumer.java
+│   └── resources/
+│       └── dev1.properties
+└── pom.xml (if using Maven)
 ```
 
-**Producer Output**:
-```
-Message sent: MyEvent{name='event1', timestamp=1706367334468}
-```
+### Conclusion
 
-**Consumer Output**:
-```
-Received message: MyEvent{name='event1', timestamp=1706367334468}
-```
+By externalizing your configuration into a `dev1.properties` file, you can easily update Kafka-related configurations, including security settings and topic names, without modifying your code. This also helps keep sensitive credentials (like client IDs and secrets) outside the application code itself, which is a good practice for security.
 
-### Key Benefits
-- Using `readClassAndObject` removes the need to specify the class explicitly during deserialization.
-- This approach is useful when the consumer doesn't know the exact type of the messages ahead of time.
+Let me know if you need further clarification or adjustments!
+
