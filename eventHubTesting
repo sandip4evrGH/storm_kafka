@@ -1,0 +1,269 @@
+Certainly! Below is a single file that contains all the necessary Maven configuration, Java code, and the required `dev1.properties` file to set up a Maven project that will use **Azure Event Hubs with Kafka**, **OAuthBEARER authentication**, and be packaged as a **runnable JAR**.
+
+### 1. **Maven Project Structure**:
+
+Here’s the file structure of the Maven project:
+
+```
+your-project
+│
+├── pom.xml
+├── src
+│   └── main
+│       └── java
+│           └── com
+│               └── example
+│                   └── kafka
+│                       ├── AzureEventHubProducer.java
+│                       └── AzureEventHubConsumer.java
+└── dev1.properties
+```
+
+---
+
+### 2. **pom.xml (Maven Configuration)**
+
+This `pom.xml` contains all necessary dependencies for Kafka, OAuth, and Maven Assembly plugin to create the executable JAR.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>azure-eventhub-kafka</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <dependencies>
+        <!-- Kafka Clients -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+
+        <!-- SLF4J Logging (Required by Kafka) -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>1.7.32</version>
+        </dependency>
+
+        <!-- Logback (Required by Kafka) -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.2.6</version>
+        </dependency>
+
+        <!-- Kafka OAuth Bearer Authentication -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>3.0.0</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                        <configuration>
+                            <archive>
+                                <manifest>
+                                    <addClasspath>true</addClasspath>
+                                    <mainClass>com.example.kafka.AzureEventHubProducer</mainClass>
+                                </manifest>
+                            </archive>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+---
+
+### 3. **Java Code**
+
+#### `AzureEventHubProducer.java`
+
+```java
+package com.example.kafka;
+
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Properties;
+
+public class AzureEventHubProducer {
+
+    public static void main(String[] args) {
+        try {
+            // Load the properties file
+            Properties producerProperties = loadProperties("dev1.properties");
+
+            // Set up the producer properties
+            producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+            producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+
+            // Initialize Kafka producer
+            KafkaProducer<String, String> producer = new KafkaProducer<>(producerProperties);
+
+            // Define topic name and message
+            String topicName = producerProperties.getProperty("topic.name");
+            String message = "This is a test message for Azure Event Hub";
+
+            // Send the message to Event Hub
+            producer.send(new ProducerRecord<>(topicName, "key", message));
+            System.out.println("Message sent to Event Hub: " + message);
+
+            // Close the producer
+            producer.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Load properties from the file
+    private static Properties loadProperties(String filename) throws IOException {
+        Properties properties = new Properties();
+        try (FileInputStream fis = new FileInputStream(filename)) {
+            properties.load(fis);
+        }
+        return properties;
+    }
+}
+```
+
+#### `AzureEventHubConsumer.java`
+
+```java
+package com.example.kafka;
+
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Properties;
+
+public class AzureEventHubConsumer {
+
+    public static void main(String[] args) {
+        try {
+            // Load the properties file
+            Properties consumerProperties = loadProperties("dev1.properties");
+
+            // Set up the consumer properties
+            consumerProperties.put("key.deserializer", StringDeserializer.class.getName());
+            consumerProperties.put("value.deserializer", StringDeserializer.class.getName());
+
+            // Initialize Kafka consumer
+            KafkaConsumer<String, String> consumer = new KafkaConsumer<>(consumerProperties);
+
+            // Define topic name
+            String topicName = consumerProperties.getProperty("topic.name");
+
+            // Subscribe to the topic
+            consumer.subscribe(Collections.singletonList(topicName));
+
+            // Poll for new messages
+            while (true) {
+                var records = consumer.poll(1000); // 1 second timeout for each poll
+                records.forEach(record -> {
+                    System.out.println("Consumed message: " + record.value());
+                });
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Load properties from the file
+    private static Properties loadProperties(String filename) throws IOException {
+        Properties properties = new Properties();
+        try (FileInputStream fis = new FileInputStream(filename)) {
+            properties.load(fis);
+        }
+        return properties;
+    }
+}
+```
+
+---
+
+### 4. **dev1.properties (Configuration File)**
+
+This `dev1.properties` file contains the configuration to connect to Azure Event Hub using **OAuthBEARER** authentication.
+
+```properties
+# dev1.properties (Make sure to replace these with your actual credentials)
+eventhub.connection.string=your_eventhub_connection_string
+security.protocol=SASL_SSL
+sasl.mechanism=OAUTHBEARER
+sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required oauth.client.id="your_client_id" oauth.client.secret="your_client_secret" oauth.token.endpoint.uri="https://login.microsoftonline.com/your_tenant_id/oauth2/v2.0/token" oauth.scope="https://eventhubs.azure.net/.default";
+
+group.id=your_consumer_group_id
+key.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+
+# Topic name
+topic.name=your_topic_name
+```
+
+---
+
+### 5. **Steps to Build and Run**
+
+1. **Place the Files**: Place the `pom.xml`, `AzureEventHubProducer.java`, `AzureEventHubConsumer.java`, and `dev1.properties` into their respective directories as outlined above.
+
+2. **Build the Project**: Open a terminal/command prompt in the root project directory and run:
+
+   ```bash
+   mvn clean package
+   ```
+
+   This will compile the Java code, download the necessary dependencies, and create a runnable JAR with all dependencies included.
+
+3. **Run the Producer**:
+   ```bash
+   java -jar target/azure-eventhub-kafka-1.0-SNAPSHOT-jar-with-dependencies.jar
+   ```
+
+4. **Run the Consumer** (if needed, you can modify the `mainClass` in `pom.xml` to run the consumer instead):
+   ```bash
+   java -jar target/azure-eventhub-kafka-1.0-SNAPSHOT-jar-with-dependencies.jar
+   ```
+
+---
+
+With this setup, you've created a **Maven project** that connects to **Azure Event Hub** using **Kafka protocol**, authenticates using **OAuthBEARER**, and sends/receives messages from the Event Hub. The project is packaged as a runnable JAR with all dependencies included.
