@@ -1,24 +1,43 @@
-To add proxy support to the `CustomAuthenticateCallbackHandler` for connecting to Azure, you need to configure the HTTP client used by `ConfidentialClientApplication` to go through a proxy. In the case of MSAL4J (Microsoft Authentication Library for Java), you can use a `Proxy` when building the HTTP client.
+You're right! The `com.microsoft.aad.msal4j.HttpClient` interface does not exist in the MSAL4J library. My apologies for the confusion. MSAL4J doesn't have a direct `HttpClient` interface for customizing HTTP requests like in the previous examples I provided.
 
-Here’s how you can modify your `CustomAuthenticateCallbackHandler` class to add support for a proxy server:
+However, you can still customize the HTTP client (including setting a proxy) by providing a custom `HttpClient` for MSAL4J using the `OkHttpClient` or `HttpClient` that MSAL4J internally supports.
 
-### Step-by-Step Implementation:
+### Solution: Customizing the HTTP Client with MSAL4J
 
-1. **Define Proxy Settings**: 
-   You need to add proxy configuration (host and port) in the `configure` method or initialize it via parameters from your `configs` map.
+To customize the HTTP client (including setting a proxy) with MSAL4J, you should use a custom **HTTP transport layer** such as **OkHttp** (which is compatible with MSAL4J) or a custom `OkHttpClient`.
 
-2. **Set Proxy on MSAL Client**: 
-   MSAL allows you to customize the HTTP client used in the authentication flow. You can modify it to use a proxy.
+Here’s how you can integrate **OkHttp** with MSAL4J to use a proxy:
 
-### Updated Code:
+### Steps:
+
+1. **Add OkHttp Dependency**: MSAL4J is compatible with OkHttp, so you'll need to add OkHttp to your project.
+   
+   **Maven Dependency**:
+   ```xml
+   <dependency>
+       <groupId>com.squareup.okhttp3</groupId>
+       <artifactId>okhttp</artifactId>
+       <version>4.9.0</version>
+   </dependency>
+   ```
+
+   Or **Gradle**:
+   ```groovy
+   dependencies {
+       implementation 'com.squareup.okhttp3:okhttp:4.9.0'
+   }
+   ```
+
+2. **Use OkHttp to Create a Proxy-Configured HTTP Client**: You can create a custom `OkHttpClient` and pass it to MSAL4J to handle authentication requests through a proxy.
+
+### Updated Code Using OkHttp:
+
+Here’s the updated code that configures MSAL4J to use **OkHttp** with a proxy:
 
 ```java
 import java.io.IOException;
-import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
-import java.net.URI;
-import java.net.URL;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -37,13 +56,17 @@ import com.microsoft.aad.msal4j.ClientCredentialParameters;
 import com.microsoft.aad.msal4j.ConfidentialClientApplication;
 import com.microsoft.aad.msal4j.IAuthenticationResult;
 import com.microsoft.aad.msal4j.IClientCredential;
-import com.microsoft.aad.msal4j.HttpClient;
 
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
 import org.apache.kafka.common.security.oauthbearer.OAuthBearerToken;
 import org.apache.kafka.common.security.oauthbearer.OAuthBearerTokenCallback;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Proxy;
+import okhttp3.Request;
+import okhttp3.Response;
 
 public class CustomAuthenticateCallbackHandler implements AuthenticateCallbackHandler {
 
@@ -62,11 +85,11 @@ public class CustomAuthenticateCallbackHandler implements AuthenticateCallbackHa
     public void configure(Map<String, ?> configs, String mechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         String bootstrapServer = Arrays.asList(configs.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)).get(0).toString();
         bootstrapServer = bootstrapServer.replaceAll("\\[|\\]", "");
-        URI uri = URI.create("https://" + bootstrapServer);
-        String sbUri = uri.getScheme() + "://" + uri.getHost();
-        this.aadParameters =
-                ClientCredentialParameters.builder(Collections.singleton(sbUri + "/.default"))
-                .build();
+        String sbUri = "https://" + bootstrapServer;
+
+        this.aadParameters = 
+            ClientCredentialParameters.builder(Collections.singleton(sbUri + "/.default"))
+            .build();
 
         this.authority = "https://login.microsoftonline.com/<tenant-id>/"; // replace <tenant-id> with your tenant id
         this.appId = "<app-id>"; // also called client id
@@ -93,26 +116,20 @@ public class CustomAuthenticateCallbackHandler implements AuthenticateCallbackHa
         }
     }
 
-    OAuthBearerToken getOAuthBearerToken() throws MalformedURLException, InterruptedException, ExecutionException, TimeoutException {
+    OAuthBearerToken getOAuthBearerToken() throws IOException, InterruptedException, ExecutionException, TimeoutException {
         if (this.aadClient == null) {
             synchronized (this) {
                 if (this.aadClient == null) {
                     IClientCredential credential = ClientCredentialFactory.createFromSecret(this.appSecret);
 
-                    // Create a custom HttpClient with a Proxy
-                    HttpClient clientWithProxy = new HttpClient() {
-                        @Override
-                        public HttpURLConnection openConnection(URL url) throws IOException {
-                            // Set up HttpURLConnection with proxy
-                            Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort));
-                            HttpURLConnection connection = (HttpURLConnection) url.openConnection(proxy);
-                            return connection;
-                        }
-                    };
+                    // Create OkHttpClient with Proxy
+                    OkHttpClient clientWithProxy = new OkHttpClient.Builder()
+                            .proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort)))
+                            .build();
 
                     this.aadClient = ConfidentialClientApplication.builder(this.appId, credential)
                             .authority(this.authority)
-                            .httpClient(clientWithProxy) // Use custom HttpClient with proxy
+                            .httpClient(clientWithProxy) // Use OkHttpClient with proxy
                             .build();
                 }
             }
@@ -128,24 +145,33 @@ public class CustomAuthenticateCallbackHandler implements AuthenticateCallbackHa
         // NOOP
     }
 }
-
-
 ```
 
 ### Key Changes:
+1. **Use OkHttpClient**:
+   - We use `OkHttpClient.Builder()` to create a custom `OkHttpClient` with a proxy.
+   - `clientWithProxy` is then passed to MSAL4J’s `ConfidentialClientApplication` to use that client for authentication requests.
 
-1. **Proxy Configuration**: The proxy host and port are fetched from the `configs` map (assumed to be passed through the Kafka configuration). You should make sure the proxy details are set in your `ProducerConfig` when using Kafka.
-   
-   Example in your Kafka configuration:
-   ```java
-   Map<String, Object> configs = new HashMap<>();
-   configs.put("proxy.host", "proxy.example.com");
-   configs.put("proxy.port", "8080");
-   ```
+2. **Proxy Configuration**:
+   - The proxy is configured using the `Proxy` class (`new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort))`).
 
-2. **HttpClient with Proxy**: 
-   In the `getOAuthBearerToken` method, a custom HTTP client is created using the `HttpClientFactory.createHttpClientBuilder()` method and is configured to use the proxy. The proxy is set via `Proxy` type (`HTTP` in this case) and the `InetSocketAddress` which includes the proxy host and port.
+3. **OkHttp Dependency**:
+   - Make sure to include OkHttp in your dependencies (as shown earlier).
 
-### Notes:
-- Make sure your proxy server allows connections to Azure endpoints.
-- You may need to handle additional proxy configurations like authentication or specific proxy options depending on your network setup.
+### Maven Dependency:
+
+Here’s the Maven dependency for OkHttp:
+
+```xml
+<dependency>
+    <groupId>com.squareup.okhttp3</groupId>
+    <artifactId>okhttp</artifactId>
+    <version>4.9.0</version>
+</dependency>
+```
+
+### Summary:
+- MSAL4J doesn’t provide an interface for directly customizing HTTP clients, but you can configure it to use an external client such as **OkHttp**.
+- This solution configures MSAL4J to use OkHttp with proxy settings for authentication requests.
+
+Let me know if you run into any issues!
