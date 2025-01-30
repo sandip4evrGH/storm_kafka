@@ -1,0 +1,144 @@
+To add proxy support to the `CustomAuthenticateCallbackHandler` for connecting to Azure, you need to configure the HTTP client used by `ConfidentialClientApplication` to go through a proxy. In the case of MSAL4J (Microsoft Authentication Library for Java), you can use a `Proxy` when building the HTTP client.
+
+Here’s how you can modify your `CustomAuthenticateCallbackHandler` class to add support for a proxy server:
+
+### Step-by-Step Implementation:
+
+1. **Define Proxy Settings**: 
+   You need to add proxy configuration (host and port) in the `configure` method or initialize it via parameters from your `configs` map.
+
+2. **Set Proxy on MSAL Client**: 
+   MSAL allows you to customize the HTTP client used in the authentication flow. You can modify it to use a proxy.
+
+### Updated Code:
+
+```java
+import java.io.IOException;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeoutException;
+
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.UnsupportedCallbackException;
+import javax.security.auth.login.AppConfigurationEntry;
+
+import com.microsoft.aad.msal4j.ClientCredentialFactory;
+import com.microsoft.aad.msal4j.ClientCredentialParameters;
+import com.microsoft.aad.msal4j.ConfidentialClientApplication;
+import com.microsoft.aad.msal4j.IAuthenticationResult;
+import com.microsoft.aad.msal4j.IClientCredential;
+import com.microsoft.aad.msal4j.PublicClientApplication;
+import com.microsoft.aad.msal4j.HttpClient;
+import com.microsoft.aad.msal4j.HttpClientFactory;
+
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.security.auth.AuthenticateCallbackHandler;
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerToken;
+import org.apache.kafka.common.security.oauthbearer.OAuthBearerTokenCallback;
+
+public class CustomAuthenticateCallbackHandler implements AuthenticateCallbackHandler {
+
+    final static ScheduledExecutorService EXECUTOR_SERVICE = Executors.newScheduledThreadPool(1);
+
+    private String authority;
+    private String appId;
+    private String appSecret;
+    private ConfidentialClientApplication aadClient;
+    private ClientCredentialParameters aadParameters;
+
+    private String proxyHost;
+    private int proxyPort;
+
+    @Override
+    public void configure(Map<String, ?> configs, String mechanism, List<AppConfigurationEntry> jaasConfigEntries) {
+        String bootstrapServer = Arrays.asList(configs.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG)).get(0).toString();
+        bootstrapServer = bootstrapServer.replaceAll("\\[|\\]", "");
+        URI uri = URI.create("https://" + bootstrapServer);
+        String sbUri = uri.getScheme() + "://" + uri.getHost();
+        this.aadParameters =
+                ClientCredentialParameters.builder(Collections.singleton(sbUri + "/.default"))
+                .build();
+
+        this.authority = "https://login.microsoftonline.com/<tenant-id>/"; // replace <tenant-id> with your tenant id
+        this.appId = "<app-id>"; // also called client id
+        this.appSecret = "<app-password>"; // also called client secret
+
+        // Fetch proxy settings from configs
+        this.proxyHost = (String) configs.get("proxy.host");
+        this.proxyPort = Integer.parseInt((String) configs.get("proxy.port"));
+    }
+
+    public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
+        for (Callback callback : callbacks) {
+            if (callback instanceof OAuthBearerTokenCallback) {
+                try {
+                    OAuthBearerToken token = getOAuthBearerToken();
+                    OAuthBearerTokenCallback oauthCallback = (OAuthBearerTokenCallback) callback;
+                    oauthCallback.token(token);
+                } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                    e.printStackTrace();
+                }
+            } else {
+                throw new UnsupportedCallbackException(callback);
+            }
+        }
+    }
+
+    OAuthBearerToken getOAuthBearerToken() throws MalformedURLException, InterruptedException, ExecutionException, TimeoutException {
+        if (this.aadClient == null) {
+            synchronized (this) {
+                if (this.aadClient == null) {
+                    IClientCredential credential = ClientCredentialFactory.createFromSecret(this.appSecret);
+
+                    // Create HTTP client with proxy
+                    HttpClient httpClient = HttpClientFactory.createHttpClientBuilder()
+                            .proxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, proxyPort)))
+                            .build();
+
+                    this.aadClient = ConfidentialClientApplication.builder(this.appId, credential)
+                            .authority(this.authority)
+                            .httpClient(httpClient) // Set the custom HTTP client with proxy
+                            .build();
+                }
+            }
+        }
+
+        IAuthenticationResult authResult = this.aadClient.acquireToken(this.aadParameters).get();
+        System.out.println("TOKEN ACQUIRED");
+
+        return new OAuthBearerTokenImp(authResult.accessToken(), authResult.expiresOnDate());
+    }
+
+    public void close() throws KafkaException {
+        // NOOP
+    }
+}
+```
+
+### Key Changes:
+
+1. **Proxy Configuration**: The proxy host and port are fetched from the `configs` map (assumed to be passed through the Kafka configuration). You should make sure the proxy details are set in your `ProducerConfig` when using Kafka.
+   
+   Example in your Kafka configuration:
+   ```java
+   Map<String, Object> configs = new HashMap<>();
+   configs.put("proxy.host", "proxy.example.com");
+   configs.put("proxy.port", "8080");
+   ```
+
+2. **HttpClient with Proxy**: 
+   In the `getOAuthBearerToken` method, a custom HTTP client is created using the `HttpClientFactory.createHttpClientBuilder()` method and is configured to use the proxy. The proxy is set via `Proxy` type (`HTTP` in this case) and the `InetSocketAddress` which includes the proxy host and port.
+
+### Notes:
+- Make sure your proxy server allows connections to Azure endpoints.
+- You may need to handle additional proxy configurations like authentication or specific proxy options depending on your network setup.
