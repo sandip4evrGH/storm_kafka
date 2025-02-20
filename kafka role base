@@ -1,0 +1,68 @@
+Kafka User and Role Management with SimpleAclAuthorizer
+1. Configure Kafka Brokers for SASL Authentication
+Edit the server.properties file on your Kafka brokers to enable SASL authentication and set the authorizer class name:
+
+properties
+# Enable SASL
+listeners=SASL_PLAINTEXT://:9092
+advertised.listeners=SASL_PLAINTEXT://your.kafka.broker:9092
+security.inter.broker.protocol=SASL_PLAINTEXT
+
+# Set the SASL mechanism
+sasl.enabled.mechanisms=PLAIN
+
+# Configure the authorizer
+authorizer.class.name=kafka.security.auth.SimpleAclAuthorizer
+
+# Provide the JAAS configuration
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+   username="admin" \
+   password="admin-secret";
+2. Create a JAAS Configuration File
+Create a JAAS configuration file (kafka_client_jaas.conf) for the client (producer/consumer) with the following content:
+
+properties
+KafkaClient {
+   org.apache.kafka.common.security.plain.PlainLoginModule required
+   username="alice"
+   password="alice-secret";
+};
+3. Set Environment Variable
+Set the KAFKA_OPTS environment variable to point to the JAAS configuration file:
+
+sh
+export KAFKA_OPTS="-Djava.security.auth.login.config=/path/to/kafka_client_jaas.conf"
+4. Managing Users and Roles
+Adding an ACL (Granting Permissions):
+
+sh
+kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --add --allow-principal User:alice --operation READ --topic my-topic
+kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --add --allow-principal User:alice --operation WRITE --topic my-topic
+Removing an ACL (Revoking Permissions):
+
+sh
+kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --remove --allow-principal User:alice --operation READ --topic my-topic
+kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --remove --allow-principal User:alice --operation WRITE --topic my-topic
+Listing ACLs:
+
+sh
+kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --list
+5. Testing Users
+Creating a Topic:
+
+sh
+kafka-topics.sh --create --zookeeper localhost:2181 --replication-factor 1 --partitions 1 --topic test-topic
+Producing Messages:
+
+sh
+kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
+Consuming Messages:
+
+sh
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-topic --from-beginning
+Testing Permission Denials: Attempt to perform operations that the user does not have permission for and ensure they are denied.
+
+Example:
+
+sh
+kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
