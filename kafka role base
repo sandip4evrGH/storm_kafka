@@ -1,68 +1,186 @@
-Kafka User and Role Management with SimpleAclAuthorizer
-1. Configure Kafka Brokers for SASL Authentication
-Edit the server.properties file on your Kafka brokers to enable SASL authentication and set the authorizer class name:
+Understood! Here's how to set up Kafka with SASL_PLAINTEXT authentication for a 3-node Zookeeper setup, 6 Kafka brokers, and multiple users, with a focus on configuring everything for SASL_PLAINTEXT.
 
-properties
-# Enable SASL
-listeners=SASL_PLAINTEXT://:9092
-advertised.listeners=SASL_PLAINTEXT://your.kafka.broker:9092
-security.inter.broker.protocol=SASL_PLAINTEXT
+---
 
-# Set the SASL mechanism
-sasl.enabled.mechanisms=PLAIN
+### **1. Zookeeper Configuration (SASL_PLAINTEXT)**
 
-# Configure the authorizer
-authorizer.class.name=kafka.security.auth.SimpleAclAuthorizer
+#### **Update `zookeeper.properties`**
+On each of the three Zookeeper nodes, add the following:
+```plaintext
+authProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider
+requireClientAuthScheme=sasl
+```
 
-# Provide the JAAS configuration
-sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
-   username="admin" \
-   password="admin-secret";
-2. Create a JAAS Configuration File
-Create a JAAS configuration file (kafka_client_jaas.conf) for the client (producer/consumer) with the following content:
-
-properties
-KafkaClient {
-   org.apache.kafka.common.security.plain.PlainLoginModule required
-   username="alice"
-   password="alice-secret";
+#### **Create Zookeeper JAAS Config**
+Create a file (e.g., `zookeeper_jaas.conf`) on each Zookeeper node:
+```plaintext
+Server {
+    org.apache.zookeeper.server.auth.DigestLoginModule required
+    user_admin="admin-password";
+    user_user1="user1-password";
+    user_user2="user2-password";
 };
-3. Set Environment Variable
-Set the KAFKA_OPTS environment variable to point to the JAAS configuration file:
+```
 
-sh
-export KAFKA_OPTS="-Djava.security.auth.login.config=/path/to/kafka_client_jaas.conf"
-4. Managing Users and Roles
-Adding an ACL (Granting Permissions):
+#### **Start Zookeeper with SASL_PLAINTEXT**
+Run Zookeeper with the JAAS configuration:
+```bash
+export KAFKA_OPTS="-Djava.security.auth.login.config=/path/to/zookeeper_jaas.conf"
+bin/zookeeper-server-start.sh config/zookeeper.properties
+```
 
-sh
-kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --add --allow-principal User:alice --operation READ --topic my-topic
-kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --add --allow-principal User:alice --operation WRITE --topic my-topic
-Removing an ACL (Revoking Permissions):
+---
 
-sh
-kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --remove --allow-principal User:alice --operation READ --topic my-topic
-kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --remove --allow-principal User:alice --operation WRITE --topic my-topic
-Listing ACLs:
+### **2. Kafka Broker Configuration (6 Nodes)**
 
-sh
-kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --list
-5. Testing Users
-Creating a Topic:
+#### **Update `server.properties`**
+On all six Kafka brokers, add the following:
+```plaintext
+listeners=SASL_PLAINTEXT://:9092
+advertised.listeners=SASL_PLAINTEXT://<broker-host>:9092
+sasl.enabled.mechanisms=PLAIN
+sasl.mechanism.inter.broker.protocol=PLAIN
+inter.broker.listener.name=SASL_PLAINTEXT
+zookeeper.connect=<zookeeper1>:2181,<zookeeper2>:2181,<zookeeper3>:2181
+```
 
-sh
-kafka-topics.sh --create --zookeeper localhost:2181 --replication-factor 1 --partitions 1 --topic test-topic
-Producing Messages:
+#### **Create Kafka Broker JAAS Config**
+Create a JAAS file for Kafka brokers (e.g., `kafka_broker_jaas.conf`):
+```plaintext
+KafkaServer {
+    org.apache.kafka.common.security.plain.PlainLoginModule required
+    username="admin" password="admin-password";
+    username="user1" password="user1-password";
+    username="user2" password="user2-password";
+};
+```
 
-sh
-kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
-Consuming Messages:
+#### **Start Kafka with SASL_PLAINTEXT**
+Run Kafka with the JAAS configuration:
+```bash
+export KAFKA_OPTS="-Djava.security.auth.login.config=/path/to/kafka_broker_jaas.conf"
+bin/kafka-server-start.sh config/server.properties
+```
 
-sh
-kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic test-topic --from-beginning
-Testing Permission Denials: Attempt to perform operations that the user does not have permission for and ensure they are denied.
+---
 
-Example:
+### **3. Adding ACLs for Users**
 
-sh
-kafka-console-producer.sh --broker-list localhost:9092 --topic test-topic
+#### **Admin User (Full Access)**
+```bash
+bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+    --add --allow-principal User:admin \
+    --operation All --cluster
+```
+
+#### **User1 (Read/Write on `Topic1`)**
+```bash
+bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+    --add --allow-principal User:user1 \
+    --operation Read --operation Write --topic Topic1
+```
+
+#### **User2 (Read Access on `Topic2`)**
+```bash
+bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+    --add --allow-principal User:user2 \
+    --operation Read --topic Topic2
+```
+
+---
+
+### **4. Kafka Client Configuration**
+
+#### **JAAS Configs for Each User**
+- **Admin (`admin_jaas.conf`):**
+  ```plaintext
+  KafkaClient {
+      org.apache.kafka.common.security.plain.PlainLoginModule required
+      username="admin"
+      password="admin-password";
+  };
+  ```
+
+- **User1 (`user1_jaas.conf`):**
+  ```plaintext
+  KafkaClient {
+      org.apache.kafka.common.security.plain.PlainLoginModule required
+      username="user1"
+      password="user1-password";
+  };
+  ```
+
+- **User2 (`user2_jaas.conf`):**
+  ```plaintext
+  KafkaClient {
+      org.apache.kafka.common.security.plain.PlainLoginModule required
+      username="user2"
+      password="user2-password";
+  };
+  ```
+
+#### **Client Properties**
+Each user will need a properties file:
+- **Admin (`admin_client.properties`):**
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=PLAIN
+  sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="admin" \
+      password="admin-password";
+  ```
+
+- **User1 (`user1_client.properties`):**
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=PLAIN
+  sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="user1" \
+      password="user1-password";
+  ```
+
+- **User2 (`user2_client.properties`):**
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=PLAIN
+  sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+      username="user2" \
+      password="user2-password";
+  ```
+
+---
+
+### **5. Testing Configuration**
+
+#### **List Topics**
+Run as `admin`:
+```bash
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --list --command-config admin_client.properties
+```
+
+#### **Produce and Consume Messages**
+- **User1 Producing to `Topic1`:**
+  ```bash
+  bin/kafka-console-producer.sh --bootstrap-server localhost:9092 \
+      --topic Topic1 --producer.config user1_client.properties
+  ```
+
+- **User2 Consuming from `Topic2`:**
+  ```bash
+  bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+      --topic Topic2 --from-beginning --consumer.config user2_client.properties
+  ```
+
+---
+
+### **6. List All ACLs**
+To view all ACLs, run:
+```bash
+bin/kafka-acls.sh --bootstrap-server localhost:9092 --list
+```
+
+This command will display all users, their permissions, and the resources they can access.
+
+---
+
+With these configurations, your Kafka cluster will be secured using **SASL_PLAINTEXT** and managed with ACLs for multiple users. Let me know if there's anything you'd like me to clarify further!
