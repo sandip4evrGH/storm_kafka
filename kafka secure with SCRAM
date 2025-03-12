@@ -1,0 +1,150 @@
+To set up Kafka ACLs with **SCRAM (Salted Challenge Response Authentication Mechanism)** for authentication, follow these steps. SCRAM provides a secure way to authenticate users with hashed passwords and is supported by Kafka with SHA-256 and SHA-512 algorithms.
+
+---
+
+### **1. Enable SCRAM Authentication on Kafka Brokers**
+
+#### **Update `server.properties`**
+On all Kafka brokers, add the following configurations:
+```plaintext
+listeners=SASL_PLAINTEXT://:9092
+advertised.listeners=SASL_PLAINTEXT://<broker-host>:9092
+sasl.enabled.mechanisms=SCRAM-SHA-256,SCRAM-SHA-512
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
+inter.broker.listener.name=SASL_PLAINTEXT
+zookeeper.connect=<zookeeper1>:2181,<zookeeper2>:2181,<zookeeper3>:2181
+```
+
+---
+
+### **2. Create SCRAM Users**
+
+#### **Add Users with SCRAM Credentials**
+Use the `kafka-configs.sh` script to create users and set their SCRAM credentials:
+```bash
+# Add user alice with SCRAM-SHA-256 and SCRAM-SHA-512
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+    --add-config 'SCRAM-SHA-256=[password=alice-password],SCRAM-SHA-512=[password=alice-password]' \
+    --entity-type users --entity-name alice
+
+# Add user bob with SCRAM-SHA-256
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter \
+    --add-config 'SCRAM-SHA-256=[password=bob-password]' \
+    --entity-type users --entity-name bob
+```
+
+---
+
+### **3. Configure ACLs for Users**
+
+#### **Grant Access to Specific Topics**
+- **Alice (Read/Write on `Topic1`)**:
+  ```bash
+  bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+      --add --allow-principal User:alice \
+      --operation Read --operation Write --topic Topic1
+  ```
+
+- **Bob (Read Access on `Topic2`)**:
+  ```bash
+  bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+      --add --allow-principal User:bob \
+      --operation Read --topic Topic2
+  ```
+
+#### **Grant Access to Topic Patterns**
+- **Alice (Read/Write on topics starting with `Test-`)**:
+  ```bash
+  bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+      --add --allow-principal User:alice \
+      --operation Read --operation Write --topic Test-* --resource-pattern-type prefixed
+  ```
+
+#### **Grant Cluster-Level Access**
+- **Admin User (Full Access)**:
+  ```bash
+  bin/kafka-acls.sh --bootstrap-server localhost:9092 \
+      --add --allow-principal User:admin \
+      --operation All --cluster
+  ```
+
+---
+
+### **4. Configure Kafka Clients**
+
+#### **Create JAAS Configurations**
+Each client needs a JAAS configuration file to authenticate with SCRAM.
+
+- **Alice (`alice_jaas.conf`)**:
+  ```plaintext
+  KafkaClient {
+      org.apache.kafka.common.security.scram.ScramLoginModule required
+      username="alice"
+      password="alice-password";
+  };
+  ```
+
+- **Bob (`bob_jaas.conf`)**:
+  ```plaintext
+  KafkaClient {
+      org.apache.kafka.common.security.scram.ScramLoginModule required
+      username="bob"
+      password="bob-password";
+  };
+  ```
+
+#### **Client Properties**
+Each client also needs a properties file to specify the security protocol and mechanism.
+
+- **Alice (`alice_client.properties`)**:
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=SCRAM-SHA-256
+  sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+      username="alice" \
+      password="alice-password";
+  ```
+
+- **Bob (`bob_client.properties`)**:
+  ```plaintext
+  security.protocol=SASL_PLAINTEXT
+  sasl.mechanism=SCRAM-SHA-256
+  sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+      username="bob" \
+      password="bob-password";
+  ```
+
+---
+
+### **5. Test the Configuration**
+
+#### **List Topics**
+Run as `alice`:
+```bash
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --list --command-config alice_client.properties
+```
+
+#### **Produce and Consume Messages**
+- **Alice Producing to `Topic1`:**
+  ```bash
+  bin/kafka-console-producer.sh --bootstrap-server localhost:9092 \
+      --topic Topic1 --producer.config alice_client.properties
+  ```
+
+- **Bob Consuming from `Topic2`:**
+  ```bash
+  bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+      --topic Topic2 --from-beginning --consumer.config bob_client.properties
+  ```
+
+---
+
+### **6. List All ACLs**
+To view all ACLs, run:
+```bash
+bin/kafka-acls.sh --bootstrap-server localhost:9092 --list
+```
+
+---
+
+This setup ensures secure authentication using SCRAM and fine-grained authorization using ACLs. Let me know if you'd like further clarification or assistance!
