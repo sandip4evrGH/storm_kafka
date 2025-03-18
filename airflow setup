@@ -1,0 +1,165 @@
+Setting up Apache Airflow with **supervisord**, deploying it using **Ansible**, and managing health and disk checks across a 12-node cluster is a comprehensive task. Here's a detailed guide to achieve this:
+
+---
+
+### **1. Setting Up Airflow with Supervisord**
+#### **a. Install Airflow**
+1. Install Airflow using pip:
+   ```bash
+   pip install apache-airflow
+   ```
+2. Initialize the Airflow database:
+   ```bash
+   airflow db init
+   ```
+3. Create an admin user:
+   ```bash
+   airflow users create \
+       --username admin \
+       --firstname Admin \
+       --lastname User \
+       --role Admin \
+       --email admin@example.com
+   ```
+
+#### **b. Configure Supervisord**
+1. Install `supervisord`:
+   ```bash
+   sudo apt install supervisor
+   ```
+2. Create a configuration file for Airflow components (e.g., `airflow_supervisord.conf`):
+   ```ini
+   [program:airflow-webserver]
+   command=airflow webserver
+   autostart=true
+   autorestart=true
+   stderr_logfile=/var/log/airflow/webserver.err.log
+   stdout_logfile=/var/log/airflow/webserver.out.log
+
+   [program:airflow-scheduler]
+   command=airflow scheduler
+   autostart=true
+   autorestart=true
+   stderr_logfile=/var/log/airflow/scheduler.err.log
+   stdout_logfile=/var/log/airflow/scheduler.out.log
+
+   [program:airflow-worker]
+   command=airflow celery worker
+   autostart=true
+   autorestart=true
+   stderr_logfile=/var/log/airflow/worker.err.log
+   stdout_logfile=/var/log/airflow/worker.out.log
+   ```
+3. Add the configuration to `supervisord`:
+   ```bash
+   sudo mv airflow_supervisord.conf /etc/supervisor/conf.d/
+   sudo supervisorctl reread
+   sudo supervisorctl update
+   ```
+
+---
+
+### **2. Deploy Airflow Using Ansible**
+#### **a. Create an Ansible Playbook**
+1. Define the playbook (`airflow_deploy.yml`):
+   ```yaml
+   - hosts: all
+     become: yes
+     tasks:
+       - name: Install dependencies
+         apt:
+           name: "{{ item }}"
+           state: present
+         loop:
+           - python3-pip
+           - supervisor
+
+       - name: Install Airflow
+         pip:
+           name: apache-airflow
+
+       - name: Configure supervisord
+         copy:
+           src: airflow_supervisord.conf
+           dest: /etc/supervisor/conf.d/airflow_supervisord.conf
+
+       - name: Restart supervisord
+         command: supervisorctl reread && supervisorctl update
+   ```
+
+2. Create an inventory file (`inventory.ini`):
+   ```ini
+   [dev]
+   dev-node1 ansible_host=192.168.1.101
+   dev-node2 ansible_host=192.168.1.102
+
+   [test]
+   test-node1 ansible_host=192.168.2.101
+   test-node2 ansible_host=192.168.2.102
+
+   [prod]
+   prod-node1 ansible_host=192.168.3.101
+   prod-node2 ansible_host=192.168.3.102
+   ```
+
+#### **b. Run the Playbook**
+Deploy Airflow to all nodes:
+```bash
+ansible-playbook -i inventory.ini airflow_deploy.yml
+```
+
+---
+
+### **3. Managing Dev, Test, and Prod Clusters**
+- Use separate inventory groups (`[dev]`, `[test]`, `[prod]`) in the `inventory.ini` file.
+- Define environment-specific variables in `group_vars` (e.g., `group_vars/dev.yml`, `group_vars/test.yml`, `group_vars/prod.yml`).
+
+---
+
+### **4. Setting Up Health Checks**
+#### **a. Airflow Health Check**
+1. Use the `/health` endpoint of the Airflow webserver:
+   ```bash
+   curl http://<webserver_host>:8080/health
+   ```
+   Example response:
+   ```json
+   {
+       "metadatabase": {"status": "healthy"},
+       "scheduler": {"status": "healthy"}
+   }
+   ```
+
+2. Automate health checks with a script:
+   ```bash
+   #!/bin/bash
+   STATUS=$(curl -s http://<webserver_host>:8080/health | jq -r '.scheduler.status')
+   if [ "$STATUS" != "healthy" ]; then
+       echo "Scheduler is unhealthy!" | mail -s "Airflow Alert" admin@example.com
+   fi
+   ```
+
+#### **b. Disk Check**
+1. Use `df` to monitor disk usage:
+   ```bash
+   df -h /path/to/airflow
+   ```
+2. Automate disk checks with a script:
+   ```bash
+   #!/bin/bash
+   USAGE=$(df /path/to/airflow | awk 'NR==2 {print $5}' | sed 's/%//')
+   if [ "$USAGE" -gt 80 ]; then
+       echo "Disk usage is above 80%!" | mail -s "Disk Alert" admin@example.com
+   fi
+   ```
+
+---
+
+### **5. Running on a 12-Node Cluster**
+- Ensure all nodes have the same Airflow and supervisord configuration.
+- Use Ansible to deploy and manage the cluster.
+- Set up a load balancer (e.g., HAProxy) to distribute traffic across nodes.
+
+---
+
+This setup ensures a robust, scalable, and monitored Airflow deployment. Let me know if you'd like help with any specific part! 🚀
