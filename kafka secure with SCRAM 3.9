@@ -15,8 +15,8 @@ listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093,SASL_PLAINTEXT:
 advertised.listeners=PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094
 log.dirs=/var/lib/kafka-data
 security.inter.broker.protocol=SASL_PLAINTEXT
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
-sasl.enabled.mechanisms=SCRAM-SHA-256
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.enabled.mechanisms=SCRAM-SHA-512
 listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
 super.users=User:admin
 authorizer.class.name=kafka.security.authorizer.AclAuthorizer
@@ -27,25 +27,25 @@ EOF
 
 cat <<EOF > config/producer.properties
 security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-256
+sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
 EOF
 
 cat <<EOF > config/consumer.properties
 security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-256
+sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
 EOF
 
 cat <<EOF > config/admin-client.properties
 security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-256
+sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$ADMIN_PASSWORD";
 EOF
 
 # 5. Create Users
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-256=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-256=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
 
 # 6. Start Kafka
 bin/kafka-server-start.sh config/kraft/server.properties
@@ -70,19 +70,19 @@ bin/kafka-acls.sh --bootstrap-server localhost:9094 --describe --topic my-secure
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
 ```
 
-**Key Changes and Explanations:**
+**Key Changes:**
 
-* **ACL Authorizer:**
-    * `authorizer.class.name=kafka.security.authorizer.AclAuthorizer`: Enables the ACL authorizer.
-    * `allow.everyone.if.no.acl.found=false`: This is very important. It ensures that if no ACLs are found, access is Denied. If this is not set to false, then anyone can access the topics.
-* **ACL Creation:**
-    * `kafka-acls.sh` is used to create ACLs.
-    * `--allow-principal User:myuser --topic my-secure-topic --operation Write`: Grants the `myuser` write access to the `my-secure-topic`.
-    * `--allow-principal User:myuser --topic my-secure-topic --operation Read`: Grants the `myuser` read access to the `my-secure-topic`.
-* **Important Security Notes:**
-    * Always store generated passwords securely.
-    * In production, use TLS for encryption in addition to SASL/SCRAM.
-    * The `super.users=User:admin` line in the server.properties file grants admin user full access.
-    * The `admin-client.properties` file is used to pass the admin users credentials for all commands that require elevated permissions.
-    * Make very sure that the `allow.everyone.if.no.acl.found=false` line is set, or your ACLs will not function as expected.
-* **Single Node KRAFT:** This config is for a single node KRAFT cluster. For a multinode cluster, the controller.quorum.voters line will change to include all controller node IDs.
+* **SCRAM-SHA-512:**
+    * All instances of `SCRAM-SHA-256` have been replaced with `SCRAM-SHA-512`. This includes:
+        * `sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512` in `server.properties`.
+        * `sasl.enabled.mechanisms=SCRAM-SHA-512` in `server.properties`.
+        * `sasl.mechanism=SCRAM-SHA-512` in `producer.properties`, `consumer.properties`, and `admin-client.properties`.
+        * `bin/kafka-configs.sh --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]'` when creating the users.
+* **No other changes:** All other configurations and commands remain the same, as they are not affected by the change in the SCRAM mechanism.
+
+**Important Considerations:**
+
+* SCRAM-SHA-512 provides stronger security than SCRAM-SHA-256.
+* Ensure that your Kafka clients and other applications support SCRAM-SHA-512.
+* As always, store your passwords securely.
+* The `allow.everyone.if.no.acl.found=false` is very important.
