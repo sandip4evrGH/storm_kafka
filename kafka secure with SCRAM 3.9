@@ -1,74 +1,35 @@
-You are absolutely right. My apologies for the error. The `inter.broker.listener.name` and `security.inter.broker.protocol` options are mutually exclusive in Kafka configurations. To resolve the issue, we need to remove the `inter.broker.listener.name` line, as `security.inter.broker.protocol` already defines the listener.
-
-Here's the corrected `config/kraft/server.properties` file:
-
-```properties
-node.id=$(uuidgen)
-process.roles=broker,controller
-controller.quorum.voters=$(uuidgen)@localhost:9093
-listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093,SASL_PLAINTEXT://localhost:9094
-advertised.listeners=PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094
-# inter.broker.listener.name=PLAINTEXT # Remove this line
-controller.listener.names=CONTROLLER
-log.dirs=/var/lib/kafka-data
-num.partitions=1
-default.replication.factor=1
-offsets.topic.replication.factor=1
-transaction.state.log.replication.factor=1
-transaction.state.log.min.isr=1
-log.retention.hours=168
-log.segment.bytes=1073741824
-log.retention.check.interval.ms=300000
-zookeeper.connect=unused
-security.inter.broker.protocol=SASL_PLAINTEXT
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
-sasl.enabled.mechanisms=SCRAM-SHA-256
-listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
-super.users=User:admin
-```
-
-**Corrected Script:**
-
 ```bash
-# Configuration for config/kraft/server.properties (corrected)
+# 1. Generate Node ID
+NODE_ID=$(uuidgen)
 
+# 2. Generate User Passwords
+PASSWORD=$(openssl rand -base64 32)
+ADMIN_PASSWORD=$(openssl rand -base64 32)
+
+# 3. Server Configuration (config/kraft/server.properties)
 cat <<EOF > config/kraft/server.properties
-node.id=$(uuidgen)
+node.id=$NODE_ID
 process.roles=broker,controller
-controller.quorum.voters=$(uuidgen)@localhost:9093
+controller.quorum.voters=$NODE_ID@localhost:9093
 listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093,SASL_PLAINTEXT://localhost:9094
 advertised.listeners=PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094
-controller.listener.names=CONTROLLER
 log.dirs=/var/lib/kafka-data
-num.partitions=1
-default.replication.factor=1
-offsets.topic.replication.factor=1
-transaction.state.log.replication.factor=1
-transaction.state.log.min.isr=1
-log.retention.hours=168
-log.segment.bytes=1073741824
-log.retention.check.interval.ms=300000
-zookeeper.connect=unused
 security.inter.broker.protocol=SASL_PLAINTEXT
 sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
 sasl.enabled.mechanisms=SCRAM-SHA-256
 listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
 super.users=User:admin
+authorizer.class.name=kafka.security.authorizer.AclAuthorizer
+allow.everyone.if.no.acl.found=false
 EOF
 
-# Rest of the configurations and commands remain the same.
+# 4. User Configuration (producer.properties, consumer.properties, admin-client.properties)
 
-# Configuration for config/producer.properties
-
-PASSWORD=$(openssl rand -base64 32)
-echo "User Password: $PASSWORD"
 cat <<EOF > config/producer.properties
 security.protocol=SASL_PLAINTEXT
 sasl.mechanism=SCRAM-SHA-256
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
 EOF
-
-# Configuration for config/consumer.properties
 
 cat <<EOF > config/consumer.properties
 security.protocol=SASL_PLAINTEXT
@@ -76,39 +37,52 @@ sasl.mechanism=SCRAM-SHA-256
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
 EOF
 
-# Configuration for config/admin-client.properties
-ADMIN_PASSWORD=$(openssl rand -base64 32)
-echo "Admin Password: $ADMIN_PASSWORD"
-
 cat <<EOF > config/admin-client.properties
 security.protocol=SASL_PLAINTEXT
 sasl.mechanism=SCRAM-SHA-256
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$ADMIN_PASSWORD";
 EOF
 
-# Commands to create users:
-
+# 5. Create Users
 bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-256=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
-
 bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-256=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
 
-# Start Kafka:
-
+# 6. Start Kafka
 bin/kafka-server-start.sh config/kraft/server.properties
 
-# Example client commands:
-
-# Create a topic as admin
+# 7. Create Topic (Admin)
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-secure-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
 
-# Produce using myuser
+# 8. Create ACLs (Admin)
+bin/kafka-acls.sh --bootstrap-server localhost:9094 --add --allow-principal User:myuser --topic my-secure-topic --operation Write --command-config config/admin-client.properties
+bin/kafka-acls.sh --bootstrap-server localhost:9094 --add --allow-principal User:myuser --topic my-secure-topic --operation Read --command-config config/admin-client.properties
+
+# 9. Test Producer (myuser)
 bin/kafka-console-producer.sh --bootstrap-server localhost:9094 --topic my-secure-topic --producer.config config/producer.properties
 
-# Consume using myuser
+# 10. Test Consumer (myuser)
 bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-secure-topic --from-beginning --consumer.config config/consumer.properties
 
-#Describe topic as admin
+# 11. Describe ACLs (Admin)
+bin/kafka-acls.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
+
+# 12. Describe Topic (Admin)
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
 ```
 
-The only change is the removal of the `inter.broker.listener.name=PLAINTEXT` line from the `server.properties` file. This should resolve the error.
+**Key Changes and Explanations:**
+
+* **ACL Authorizer:**
+    * `authorizer.class.name=kafka.security.authorizer.AclAuthorizer`: Enables the ACL authorizer.
+    * `allow.everyone.if.no.acl.found=false`: This is very important. It ensures that if no ACLs are found, access is Denied. If this is not set to false, then anyone can access the topics.
+* **ACL Creation:**
+    * `kafka-acls.sh` is used to create ACLs.
+    * `--allow-principal User:myuser --topic my-secure-topic --operation Write`: Grants the `myuser` write access to the `my-secure-topic`.
+    * `--allow-principal User:myuser --topic my-secure-topic --operation Read`: Grants the `myuser` read access to the `my-secure-topic`.
+* **Important Security Notes:**
+    * Always store generated passwords securely.
+    * In production, use TLS for encryption in addition to SASL/SCRAM.
+    * The `super.users=User:admin` line in the server.properties file grants admin user full access.
+    * The `admin-client.properties` file is used to pass the admin users credentials for all commands that require elevated permissions.
+    * Make very sure that the `allow.everyone.if.no.acl.found=false` line is set, or your ACLs will not function as expected.
+* **Single Node KRAFT:** This config is for a single node KRAFT cluster. For a multinode cluster, the controller.quorum.voters line will change to include all controller node IDs.
