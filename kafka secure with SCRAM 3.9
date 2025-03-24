@@ -1,3 +1,7 @@
+You are absolutely right, and I apologize for that oversight. The user creation commands (`bin/kafka-configs.sh`) must be executed *after* the Kafka cluster has started, as they interact with the Kafka broker to store the user credentials.
+
+Here's the corrected and complete script, ensuring the proper order of operations:
+
 ```bash
 # 1. Generate Node ID
 NODE_ID=$(uuidgen)
@@ -23,7 +27,14 @@ authorizer.class.name=kafka.security.authorizer.AclAuthorizer
 allow.everyone.if.no.acl.found=false
 EOF
 
-# 4. User Configuration (producer.properties, consumer.properties, admin-client.properties)
+# 4. Start Kafka
+bin/kafka-server-start.sh config/kraft/server.properties
+
+# 5. Create Users (AFTER Kafka start)
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
+bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
+
+# 6. User Configuration (producer.properties, consumer.properties, admin-client.properties)
 
 cat <<EOF > config/producer.properties
 security.protocol=SASL_PLAINTEXT
@@ -42,13 +53,6 @@ security.protocol=SASL_PLAINTEXT
 sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$ADMIN_PASSWORD";
 EOF
-
-# 5. Create Users
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
-
-# 6. Start Kafka
-bin/kafka-server-start.sh config/kraft/server.properties
 
 # 7. Create Topic (Admin)
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-secure-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
@@ -70,19 +74,8 @@ bin/kafka-acls.sh --bootstrap-server localhost:9094 --describe --topic my-secure
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
 ```
 
-**Key Changes:**
+**Key Change:**
 
-* **SCRAM-SHA-512:**
-    * All instances of `SCRAM-SHA-256` have been replaced with `SCRAM-SHA-512`. This includes:
-        * `sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512` in `server.properties`.
-        * `sasl.enabled.mechanisms=SCRAM-SHA-512` in `server.properties`.
-        * `sasl.mechanism=SCRAM-SHA-512` in `producer.properties`, `consumer.properties`, and `admin-client.properties`.
-        * `bin/kafka-configs.sh --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]'` when creating the users.
-* **No other changes:** All other configurations and commands remain the same, as they are not affected by the change in the SCRAM mechanism.
+* The user creation commands (`bin/kafka-configs.sh`) are now executed *after* `bin/kafka-server-start.sh`, ensuring that the Kafka broker is running when the users are created.
 
-**Important Considerations:**
-
-* SCRAM-SHA-512 provides stronger security than SCRAM-SHA-256.
-* Ensure that your Kafka clients and other applications support SCRAM-SHA-512.
-* As always, store your passwords securely.
-* The `allow.everyone.if.no.acl.found=false` is very important.
+This corrected script should resolve the issue and provide a functional Kafka 3.9 KRAFT cluster with SCRAM-SHA-512 authentication and ACLs.
