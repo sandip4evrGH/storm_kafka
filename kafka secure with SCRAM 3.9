@@ -79,3 +79,206 @@ bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-secu
 * The user creation commands (`bin/kafka-configs.sh`) are now executed *after* `bin/kafka-server-start.sh`, ensuring that the Kafka broker is running when the users are created.
 
 This corrected script should resolve the issue and provide a functional Kafka 3.9 KRAFT cluster with SCRAM-SHA-512 authentication and ACLs.
+
+
+
+
+
+copilot.microsoft.com 
+Here's the **full configuration and scripts** for setting up a Kafka 3.9 cluster using KRaft, SCRAM-SHA-512 authentication, ACLs, and role-based deployment. These files and scripts are designed for you to download, distribute, and implement.
+
+---
+
+### **1. Configuration Files**
+
+#### **1.1. Broker + Controller `server.properties`**  
+For `apphost01` to `apphost04`:
+
+```properties
+process.roles=broker,controller
+node.id=1
+controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
+
+listeners=PLAINTEXT://apphost01:9092,SASL_SSL://apphost01:9094
+advertised.listeners=PLAINTEXT://apphost01:9092,SASL_SSL://apphost01:9094
+listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL
+inter.broker.listener.name=SASL_SSL
+
+log.dirs=/var/lib/kafka/logs
+
+sasl.enabled.mechanisms=SCRAM-SHA-512
+listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+    username="admin" \
+    password="admin-secret";
+
+metadata.log.dir=/var/lib/kafka/kraft
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+```
+
+#### **1.2. Broker-Only `server.properties`**  
+For `apphost05` to `apphost12`:
+
+```properties
+process.roles=broker
+node.id=5
+controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
+
+listeners=PLAINTEXT://apphost05:9092,SASL_SSL://apphost05:9094
+advertised.listeners=PLAINTEXT://apphost05:9092,SASL_SSL://apphost05:9094
+listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL
+inter.broker.listener.name=SASL_SSL
+
+log.dirs=/var/lib/kafka/logs
+
+sasl.enabled.mechanisms=SCRAM-SHA-512
+listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+    username="admin" \
+    password="admin-secret";
+
+metadata.log.dir=/var/lib/kafka/kraft
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+```
+
+---
+
+#### **1.3. JAAS Configuration (`kafka_server_jaas.conf`)**
+
+```plaintext
+KafkaServer {
+    org.apache.kafka.common.security.scram.ScramLoginModule required
+    username="admin"
+    password="admin-secret";
+};
+```
+
+---
+
+### **2. Bash Scripts**
+
+#### **2.1. Generate Configuration Files**
+Run this script on `apphost01` to generate configurations for all nodes:
+
+```bash
+#!/bin/bash
+
+# Define nodes and roles
+NODES=("apphost01" "apphost02" "apphost03" "apphost04" "apphost05" "apphost06" "apphost07" "apphost08" "apphost09" "apphost10" "apphost11" "apphost12")
+BROKER_CONTROLLER_NODES=("apphost01" "apphost02" "apphost03" "apphost04")
+BASE_DIR="/opt/kafka/config"
+CLUSTER_ID=$(uuidgen)
+
+# Generate server.properties
+for i in "${!NODES[@]}"; do
+  NODE=${NODES[$i]}
+  NODE_ID=$((i + 1))
+  CONFIG_FILE="$BASE_DIR/$NODE/server.properties"
+
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+
+  ROLES=$( [[ " ${BROKER_CONTROLLER_NODES[@]} " =~ " ${NODE} " ]] && echo "broker,controller" || echo "broker" )
+  echo "process.roles=$ROLES" > "$CONFIG_FILE"
+  echo "node.id=$NODE_ID" >> "$CONFIG_FILE"
+  echo "controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093" >> "$CONFIG_FILE"
+  echo "log.dirs=/var/lib/kafka/logs" >> "$CONFIG_FILE"
+  echo "listeners=PLAINTEXT://$NODE:9092,SASL_SSL://$NODE:9094" >> "$CONFIG_FILE"
+  echo "advertised.listeners=PLAINTEXT://$NODE:9092,SASL_SSL://$NODE:9094" >> "$CONFIG_FILE"
+  echo "listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL" >> "$CONFIG_FILE"
+  echo "inter.broker.listener.name=SASL_SSL" >> "$CONFIG_FILE"
+  echo "sasl.enabled.mechanisms=SCRAM-SHA-512" >> "$CONFIG_FILE"
+  echo "listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \\" >> "$CONFIG_FILE"
+  echo "    username=\"admin\" \\" >> "$CONFIG_FILE"
+  echo "    password=\"admin-secret\";" >> "$CONFIG_FILE"
+  echo "metadata.log.dir=/var/lib/kafka/kraft" >> "$CONFIG_FILE"
+done
+
+# Generate JAAS files
+for NODE in "${NODES[@]}"; do
+  JAAS_FILE="$BASE_DIR/$NODE/kafka_server_jaas.conf"
+  mkdir -p "$(dirname "$JAAS_FILE")"
+  echo "KafkaServer {" > "$JAAS_FILE"
+  echo "    org.apache.kafka.common.security.scram.ScramLoginModule required" >> "$JAAS_FILE"
+  echo "    username=\"admin\"" >> "$JAAS_FILE"
+  echo "    password=\"admin-secret\";" >> "$JAAS_FILE"
+  echo "};" >> "$JAAS_FILE"
+done
+
+echo "Configuration files generated successfully!"
+```
+
+---
+
+#### **2.2. Distribute Configuration Files**
+Use SSH to distribute files from `apphost01` to all other nodes:
+
+```bash
+#!/bin/bash
+
+BASE_DIR="/opt/kafka/config"
+BROKER_CONTROLLER_NODES=("apphost02" "apphost03" "apphost04")
+BROKER_ONLY_NODES=("apphost05" "apphost06" "apphost07" "apphost08" "apphost09" "apphost10" "apphost11" "apphost12")
+
+# Distribute Broker + Controller Configs
+for NODE in "${BROKER_CONTROLLER_NODES[@]}"; do
+  ssh $NODE "mkdir -p $BASE_DIR/$NODE"
+  scp "$BASE_DIR/apphost01/broker_controller/server.properties" $NODE:"$BASE_DIR/$NODE/server.properties"
+  scp "$BASE_DIR/apphost01/broker_controller/kafka_server_jaas.conf" $NODE:"$BASE_DIR/$NODE/kafka_server_jaas.conf"
+done
+
+# Distribute Broker-Only Configs
+for NODE in "${BROKER_ONLY_NODES[@]}"; do
+  ssh $NODE "mkdir -p $BASE_DIR/$NODE"
+  scp "$BASE_DIR/apphost01/broker_only/server.properties" $NODE:"$BASE_DIR/$NODE/server.properties"
+  scp "$BASE_DIR/apphost01/broker_only/kafka_server_jaas.conf" $NODE:"$BASE_DIR/$NODE/kafka_server_jaas.conf"
+done
+
+echo "Configuration files distributed successfully!"
+```
+
+---
+
+### **3. Initialize Kafka Cluster**
+
+#### **3.1. Format Storage for KRaft**
+Run the following on each broker-controller node:
+```bash
+bin/kafka-storage.sh format -t $(uuidgen) -c /path/to/server.properties
+```
+
+#### **3.2. Start Kafka Nodes**
+Start all nodes using:
+```bash
+bin/kafka-server-start.sh /path/to/server.properties
+```
+
+---
+
+### **4. Configure ACLs**
+
+#### **Admin ACL**
+Grant full access to admin users:
+```bash
+bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
+    --add --allow-principal User:admin --operation All --topic '*' --group '*' --cluster
+```
+
+#### **Producer ACL**
+Allow producers to write to specific topics:
+```bash
+bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
+    --add --allow-principal User:producer --operation Write --topic 'topic_name'
+```
+
+#### **Consumer ACL**
+Allow consumers to read from specific topics:
+```bash
+bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
+    --add --allow-principal User:consumer --operation Read --topic 'topic_name' --group 'group_name'
+```
+
+---
+
+Let me know if you'd like further assistance or refinement! 😊
