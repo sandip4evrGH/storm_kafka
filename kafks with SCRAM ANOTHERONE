@@ -1,0 +1,131 @@
+To set up SCRAM authentication on Apache Kafka in KRaft mode without SSL (using plaintext), you need to configure the Kafka broker to use SASL_PLAINTEXT with the SCRAM mechanism (e.g., SCRAM-SHA-256 or SCRAM-SHA-512). Since KRaft mode eliminates the dependency on ZooKeeper, SCRAM credentials must be added during the storage formatting step using the `kafka-storage` tool before starting the Kafka broker. Below is a step-by-step guide to achieve this.
+
+---
+
+### Prerequisites
+- Apache Kafka installed (version 3.3 or later, as KRaft is production-ready from 3.3).
+- Java installed (Kafka requires a compatible JDK).
+- Basic understanding of Kafka configuration and running Kafka in KRaft mode.
+
+---
+
+### Steps to Set Up SCRAM with KRaft and Plaintext
+
+#### 1. Generate a Cluster ID
+KRaft requires a unique cluster ID for the Kafka cluster. Generate one using the `kafka-storage` tool:
+
+```bash
+kafka-storage random-uuid
+```
+
+This will output a UUID, e.g., `MkU3OEVBNTcwNTJENDM2Qk`. Note it down, as you'll use it in the next step.
+
+#### 2. Prepare the Kafka Configuration File
+Create or edit the Kafka configuration file (e.g., `server.properties`) to enable SASL_PLAINTEXT with SCRAM authentication. Below is an example configuration for a single-node setup:
+
+```properties
+# Define the roles (combined broker and controller for simplicity)
+process.roles=broker,controller
+node.id=1
+controller.quorum.voters=1@localhost:9093
+
+# Listener configuration
+listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+advertised.listeners=PLAINTEXT://localhost:9092
+controller.listener.names=CONTROLLER
+listener.security.protocol.map=CONTROLLER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT
+inter.broker.listener.name=PLAINTEXT
+
+# SASL configuration
+sasl.enabled.mechanisms=SCRAM-SHA-256
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
+sasl.mechanism.controller.protocol=SCRAM-SHA-256
+security.inter.broker.protocol=SASL_PLAINTEXT
+
+# JAAS configuration for the PLAINTEXT listener
+listener.name.plaintext.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="admin" \
+  password="admin-secret" \
+  user_admin="admin-secret";
+
+# JAAS configuration for the CONTROLLER listener
+listener.name.controller.scram-sha-256.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="admin" \
+  password="admin-secret" \
+  user_admin="admin-secret";
+
+# Log directory
+log.dirs=/tmp/kraft-combined-logs
+```
+
+Key points:
+- `process.roles=broker,controller` runs a combined broker and controller (suitable for testing; in production, separate these roles).
+- `listeners` defines two listeners: one for client connections (`PLAINTEXT://:9092`) and one for the controller (`CONTROLLER://:9093`).
+- `listener.security.protocol.map` maps both listeners to `SASL_PLAINTEXT`.
+- The JAAS configuration specifies the SCRAM credentials (`username="admin" password="admin-secret"`) and maps the `admin` user to itself (`user_admin="admin-secret"`).
+
+#### 3. Format the Storage with SCRAM Credentials
+Before starting the Kafka broker, format the storage directory and add the SCRAM credentials using the `kafka-storage` tool. This step bootstraps the credentials into the `__cluster_metadata` topic, as KRaft does not rely on ZooKeeper.
+
+Run the following command, replacing `<cluster-id>` with the UUID from Step 1:
+
+```bash
+kafka-storage format \
+  --config server.properties \
+  --cluster-id <cluster-id> \
+  --add-scram "SCRAM-SHA-256=[name=admin,password=admin-secret]"
+```
+
+Example with the cluster ID `MkU3OEVBNTcwNTJENDM2Qk`:
+```bash
+kafka-storage format \
+  --config server.properties \
+  --cluster-id MkU3OEVBNTcwNTJENDM2Qk \
+  --add-scram "SCRAM-SHA-256=[name=admin,password=admin-secret]"
+```
+
+This command:
+- Formats the storage directory specified in `log.dirs`.
+- Adds the SCRAM-SHA-256 credentials for the `admin` user.
+
+#### 4. Start the Kafka Broker
+Start the Kafka broker using the configured `server.properties`:
+
+```bash
+kafka-server-start server.properties
+```
+
+The broker should start successfully, listening on port 9092 for client connections and 9093 for controller communication, both secured with SCRAM-SHA-256 over plaintext.
+
+#### 5. Verify the Setup
+To test the setup, use the Kafka console producer and consumer with a client configuration that matches the SCRAM credentials.
+
+Create a client configuration file (e.g., `client.properties`):
+```properties
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-256
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
+  username="admin" \
+  password="admin-secret";
+```
+
+- **Produce messages:**
+```bash
+kafka-console-producer --bootstrap-server localhost:9092 --topic test-topic --producer.config client.properties
+```
+
+- **Consume messages:**
+```bash
+kafka-console-consumer --bootstrap-server localhost:9092 --topic test-topic --from-beginning --consumer.config client.properties
+```
+
+If everything is configured correctly, you should be able to produce and consume messages without errors.
+
+---
+
+### Notes
+- **Security Warning:** Using SASL_PLAINTEXT means data is transmitted unencrypted. This is suitable only for development or trusted network environments. For production, consider SASL_SSL with TLS encryption.
+- **Multiple Nodes:** For a multi-node setup, adjust `controller.quorum.voters` (e.g., `1@host1:9093,2@host2:9093,3@host3:9093`) and ensure each node has a unique `node.id`. Format each node’s storage with the same cluster ID and credentials.
+- **SCRAM Variants:** You can use `SCRAM-SHA-512` instead of `SCRAM-SHA-256` by updating the mechanism in the configuration and formatting command.
+
+This setup provides a functional Kafka instance in KRaft mode with SCRAM authentication over plaintext, as requested. Let me know if you need further clarification!
