@@ -1,514 +1,112 @@
-You are absolutely right, and I apologize for that oversight. The user creation commands (`bin/kafka-configs.sh`) must be executed *after* the Kafka cluster has started, as they interact with the Kafka broker to store the user credentials.
-
-Here's the corrected and complete script, ensuring the proper order of operations:
-
 ```bash
-# 1. Generate Node ID
+# 1. Download and Extract Kafka 3.9.0
+wget https://downloads.apache.org/kafka/3.9.0/kafka_2.13-3.9.0.tgz
+tar -xzf kafka_2.13-3.9.0.tgz
+cd kafka_2.13-3.9.0
+
+# 2. Create Kafka Data Directory
+mkdir -p /var/lib/kafka-data
+
+# 3. Generate Node ID
 NODE_ID=$(uuidgen)
 
-# 2. Generate User Passwords
-PASSWORD=$(openssl rand -base64 32)
-ADMIN_PASSWORD=$(openssl rand -base64 32)
+# 4. Generate SSL Certificates (Self-Signed for Testing)
+# Replace with proper certificates for production
+KEYSTORE_PASS="kafkastore"
+TRUSTSTORE_PASS="kafkastore"
 
-# 3. Server Configuration (config/kraft/server.properties)
+keytool -genkey -alias kafka -keyalg RSA -keystore kafka.keystore.jks -validity 365 -storepass $KEYSTORE_PASS -dname "CN=localhost"
+keytool -export -alias kafka -keystore kafka.keystore.jks -file kafka.cer -storepass $KEYSTORE_PASS
+keytool -import -alias kafka -file kafka.cer -keystore kafka.truststore.jks -storepass $TRUSTSTORE_PASS
+
+# 5. Server Configuration (config/kraft/server.properties)
 cat <<EOF > config/kraft/server.properties
 node.id=$NODE_ID
 process.roles=broker,controller
 controller.quorum.voters=$NODE_ID@localhost:9093
-listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093,SASL_PLAINTEXT://localhost:9094
-advertised.listeners=PLAINTEXT://localhost:9092,SASL_PLAINTEXT://localhost:9094
+listeners=PLAINTEXT://localhost:9092,CONTROLLER://localhost:9093,SSL://localhost:9094
+advertised.listeners=SSL://localhost:9094
 log.dirs=/var/lib/kafka-data
-security.inter.broker.protocol=SASL_PLAINTEXT
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
-sasl.enabled.mechanisms=SCRAM-SHA-512
-listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT
-super.users=User:admin
-authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-allow.everyone.if.no.acl.found=false
+security.inter.broker.protocol=SSL
+listener.security.protocol.map=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,SSL:SSL
+ssl.keystore.location=kafka.keystore.jks
+ssl.keystore.password=$KEYSTORE_PASS
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+ssl.client.auth=none # or requested or required
+zookeeper.connect=unused
 EOF
 
-# 4. Start Kafka
+# 6. Start Kafka Server
 bin/kafka-server-start.sh config/kraft/server.properties
 
-# 5. Create Users (AFTER Kafka start)
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
-bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
-
-# 6. User Configuration (producer.properties, consumer.properties, admin-client.properties)
+# 7. Client Configuration (producer.properties, consumer.properties, admin-client.properties)
 
 cat <<EOF > config/producer.properties
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
 EOF
 
 cat <<EOF > config/consumer.properties
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
 EOF
 
 cat <<EOF > config/admin-client.properties
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$ADMIN_PASSWORD";
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
 EOF
 
-# 7. Create Topic (Admin)
-bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-secure-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
+# 8. Create Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-ssl-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
 
-# 8. Create ACLs (Admin)
-bin/kafka-acls.sh --bootstrap-server localhost:9094 --add --allow-principal User:myuser --topic my-secure-topic --operation Write --command-config config/admin-client.properties
-bin/kafka-acls.sh --bootstrap-server localhost:9094 --add --allow-principal User:myuser --topic my-secure-topic --operation Read --command-config config/admin-client.properties
+# 9. Produce Messages (SSL)
+bin/kafka-console-producer.sh --bootstrap-server localhost:9094 --topic my-ssl-topic --producer.config config/producer.properties
 
-# 9. Test Producer (myuser)
-bin/kafka-console-producer.sh --bootstrap-server localhost:9094 --topic my-secure-topic --producer.config config/producer.properties
+# 10. Consume Messages (SSL)
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-ssl-topic --from-beginning --consumer.config config/consumer.properties
 
-# 10. Test Consumer (myuser)
-bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-secure-topic --from-beginning --consumer.config config/consumer.properties
-
-# 11. Describe ACLs (Admin)
-bin/kafka-acls.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
-
-# 12. Describe Topic (Admin)
-bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-secure-topic --command-config config/admin-client.properties
+# 11. Describe Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-topic --command-config config/admin-client.properties
 ```
 
-**Key Change:**
-
-* The user creation commands (`bin/kafka-configs.sh`) are now executed *after* `bin/kafka-server-start.sh`, ensuring that the Kafka broker is running when the users are created.
-
-This corrected script should resolve the issue and provide a functional Kafka 3.9 KRAFT cluster with SCRAM-SHA-512 authentication and ACLs.
-
-
-
-
-
-copilot.microsoft.com 
-Here's the **full configuration and scripts** for setting up a Kafka 3.9 cluster using KRaft, SCRAM-SHA-512 authentication, ACLs, and role-based deployment. These files and scripts are designed for you to download, distribute, and implement.
-
----
-
-### **1. Configuration Files**
-
-#### **1.1. Broker + Controller `server.properties`**  
-For `apphost01` to `apphost04`:
-
-```properties
-process.roles=broker,controller
-node.id=1
-controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
-
-listeners=PLAINTEXT://apphost01:9092,SASL_SSL://apphost01:9094
-advertised.listeners=PLAINTEXT://apphost01:9092,SASL_SSL://apphost01:9094
-listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL
-inter.broker.listener.name=SASL_SSL
-
-log.dirs=/var/lib/kafka/logs
-
-sasl.enabled.mechanisms=SCRAM-SHA-512
-listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
-    username="admin" \
-    password="admin-secret";
-
-metadata.log.dir=/var/lib/kafka/kraft
-log.retention.hours=168
-log.segment.bytes=1073741824
-log.retention.check.interval.ms=300000
-```
-
-#### **1.2. Broker-Only `server.properties`**  
-For `apphost05` to `apphost12`:
-
-```properties
-process.roles=broker
-node.id=5
-controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
-
-listeners=PLAINTEXT://apphost05:9092,SASL_SSL://apphost05:9094
-advertised.listeners=PLAINTEXT://apphost05:9092,SASL_SSL://apphost05:9094
-listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL
-inter.broker.listener.name=SASL_SSL
-
-log.dirs=/var/lib/kafka/logs
-
-sasl.enabled.mechanisms=SCRAM-SHA-512
-listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
-    username="admin" \
-    password="admin-secret";
-
-metadata.log.dir=/var/lib/kafka/kraft
-log.retention.hours=168
-log.segment.bytes=1073741824
-log.retention.check.interval.ms=300000
-```
-
----
-
-#### **1.3. JAAS Configuration (`kafka_server_jaas.conf`)**
-
-```plaintext
-KafkaServer {
-    org.apache.kafka.common.security.scram.ScramLoginModule required
-    username="admin"
-    password="admin-secret";
-};
-```
-
----
-
-### **2. Bash Scripts**
-
-#### **2.1. Generate Configuration Files**
-Run this script on `apphost01` to generate configurations for all nodes:
-
-```bash
-#!/bin/bash
-
-# Define nodes and roles
-NODES=("apphost01" "apphost02" "apphost03" "apphost04" "apphost05" "apphost06" "apphost07" "apphost08" "apphost09" "apphost10" "apphost11" "apphost12")
-BROKER_CONTROLLER_NODES=("apphost01" "apphost02" "apphost03" "apphost04")
-BASE_DIR="/opt/kafka/config"
-CLUSTER_ID=$(uuidgen)
-
-# Generate server.properties
-for i in "${!NODES[@]}"; do
-  NODE=${NODES[$i]}
-  NODE_ID=$((i + 1))
-  CONFIG_FILE="$BASE_DIR/$NODE/server.properties"
-
-  mkdir -p "$(dirname "$CONFIG_FILE")"
-
-  ROLES=$( [[ " ${BROKER_CONTROLLER_NODES[@]} " =~ " ${NODE} " ]] && echo "broker,controller" || echo "broker" )
-  echo "process.roles=$ROLES" > "$CONFIG_FILE"
-  echo "node.id=$NODE_ID" >> "$CONFIG_FILE"
-  echo "controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093" >> "$CONFIG_FILE"
-  echo "log.dirs=/var/lib/kafka/logs" >> "$CONFIG_FILE"
-  echo "listeners=PLAINTEXT://$NODE:9092,SASL_SSL://$NODE:9094" >> "$CONFIG_FILE"
-  echo "advertised.listeners=PLAINTEXT://$NODE:9092,SASL_SSL://$NODE:9094" >> "$CONFIG_FILE"
-  echo "listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL" >> "$CONFIG_FILE"
-  echo "inter.broker.listener.name=SASL_SSL" >> "$CONFIG_FILE"
-  echo "sasl.enabled.mechanisms=SCRAM-SHA-512" >> "$CONFIG_FILE"
-  echo "listener.name.sasl_ssl.scram-sha-512.sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \\" >> "$CONFIG_FILE"
-  echo "    username=\"admin\" \\" >> "$CONFIG_FILE"
-  echo "    password=\"admin-secret\";" >> "$CONFIG_FILE"
-  echo "metadata.log.dir=/var/lib/kafka/kraft" >> "$CONFIG_FILE"
-done
-
-# Generate JAAS files
-for NODE in "${NODES[@]}"; do
-  JAAS_FILE="$BASE_DIR/$NODE/kafka_server_jaas.conf"
-  mkdir -p "$(dirname "$JAAS_FILE")"
-  echo "KafkaServer {" > "$JAAS_FILE"
-  echo "    org.apache.kafka.common.security.scram.ScramLoginModule required" >> "$JAAS_FILE"
-  echo "    username=\"admin\"" >> "$JAAS_FILE"
-  echo "    password=\"admin-secret\";" >> "$JAAS_FILE"
-  echo "};" >> "$JAAS_FILE"
-done
-
-echo "Configuration files generated successfully!"
-```
-
----
-
-#### **2.2. Distribute Configuration Files**
-Use SSH to distribute files from `apphost01` to all other nodes:
-
-```bash
-#!/bin/bash
-
-BASE_DIR="/opt/kafka/config"
-BROKER_CONTROLLER_NODES=("apphost02" "apphost03" "apphost04")
-BROKER_ONLY_NODES=("apphost05" "apphost06" "apphost07" "apphost08" "apphost09" "apphost10" "apphost11" "apphost12")
-
-# Distribute Broker + Controller Configs
-for NODE in "${BROKER_CONTROLLER_NODES[@]}"; do
-  ssh $NODE "mkdir -p $BASE_DIR/$NODE"
-  scp "$BASE_DIR/apphost01/broker_controller/server.properties" $NODE:"$BASE_DIR/$NODE/server.properties"
-  scp "$BASE_DIR/apphost01/broker_controller/kafka_server_jaas.conf" $NODE:"$BASE_DIR/$NODE/kafka_server_jaas.conf"
-done
-
-# Distribute Broker-Only Configs
-for NODE in "${BROKER_ONLY_NODES[@]}"; do
-  ssh $NODE "mkdir -p $BASE_DIR/$NODE"
-  scp "$BASE_DIR/apphost01/broker_only/server.properties" $NODE:"$BASE_DIR/$NODE/server.properties"
-  scp "$BASE_DIR/apphost01/broker_only/kafka_server_jaas.conf" $NODE:"$BASE_DIR/$NODE/kafka_server_jaas.conf"
-done
-
-echo "Configuration files distributed successfully!"
-```
-
----
-
-### **3. Initialize Kafka Cluster**
-
-#### **3.1. Format Storage for KRaft**
-Run the following on each broker-controller node:
-```bash
-bin/kafka-storage.sh format -t $(uuidgen) -c /path/to/server.properties
-```
-
-#### **3.2. Start Kafka Nodes**
-Start all nodes using:
-```bash
-bin/kafka-server-start.sh /path/to/server.properties
-```
-
----
-
-### **4. Configure ACLs**
-
-#### **Admin ACL**
-Grant full access to admin users:
-```bash
-bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
-    --add --allow-principal User:admin --operation All --topic '*' --group '*' --cluster
-```
-
-#### **Producer ACL**
-Allow producers to write to specific topics:
-```bash
-bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
-    --add --allow-principal User:producer --operation Write --topic 'topic_name'
-```
-
-#### **Consumer ACL**
-Allow consumers to read from specific topics:
-```bash
-bin/kafka-acls.sh --bootstrap-server apphost01:9092 \
-    --add --allow-principal User:consumer --operation Read --topic 'topic_name' --group 'group_name'
-```
-
----
-
-Let me know if you'd like further assistance or refinement! 😊
-
-
-
-one more
-more
-Okay, let's set up your Kafka cluster with KRaft and SCRAM-SHA-512 authentication. Here's a detailed configuration and explanation:
-Kafka Cluster Configuration (Version 3.9.0)
-We will define two types of server.properties files: one for the nodes acting as both Broker and Controller, and another for the nodes acting only as Brokers.
-Assumptions:
- * Kafka 3.9.0 is installed on all 12 hosts (apphost01 to apphost12).
- * You have a dedicated user (e.g., kafka) to run the Kafka processes on each host.
- * You have configured proper hostname resolution or can use IP addresses consistently. We will use hostnames in the configuration for clarity.
- * We will use the default Kafka port 9092 for broker listeners and 9093 for controller listeners. You can adjust these as needed.
- * The data and log directories (/var/lib/kafka) are created and have appropriate permissions for the Kafka user on all nodes.
-Configuration for Broker and Controller Nodes (apphost01 - apphost04)
-Create a server.properties file on each of apphost01, apphost02, apphost03, and apphost04 with the following content, making sure to adjust the broker.id accordingly:
-Example server.properties for apphost01:
-# Unique ID for this broker. Must be different for each broker.
-broker.id=1
-
-# -------------------- Listener Configuration --------------------
-# Listeners for client connections. Use SASL_PLAINTEXT for secure communication.
-listeners=SASL_PLAINTEXT://apphost01:9092,CONTROLLER://apphost01:9093
-# The hostname and port advertised to clients. This should match the listeners.
-advertised.listeners=SASL_PLAINTEXT://apphost01:9092
-
-# Listener name used for inter-broker communication.
-inter.broker.listener.name=SASL_PLAINTEXT
-
-# -------------------- Controller Configuration --------------------
-# Enable the controller quorum.
-controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
-# Listener name used for controller communication.
-controller.listener.names=CONTROLLER
-
-# -------------------- Security Configuration --------------------
-# Security protocol for inter-broker communication.
-security.inter.broker.protocol=SASL_PLAINTEXT
-# SASL mechanism for inter-broker communication.
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
-
-# Class to use for building the principal.
-principal.builder.class=org.apache.kafka.security.auth.DefaultPrincipalBuilder
-
-# Enabled SASL mechanisms for client authentication.
-sasl.enabled.mechanisms=SCRAM-SHA-512
-
-# JAAS configuration for the Kafka broker to handle SCRAM authentication.
-# Replace <YOUR_KAFKA_USER> with the user running Kafka.
-sasl.jaas.server.SCRAM-SHA-512=org.apache.kafka.common.security.scram.ScramLoginModule required \
-        username="kafka_broker" \
-        password="<YOUR_BROKER_PASSWORD>" \
-        ;
-
-# Enable authorization using ACLs.
-authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-
-# Define super users if needed. Replace <SUPER_USER_PRINCIPAL> with the principal name.
-# super.users=User:<SUPER_USER_PRINCIPAL>
-
-# -------------------- Log Configuration --------------------
-# Directory where Kafka will store its log data.
-log.dirs=/var/lib/kafka/data
-
-# Other common configurations (adjust as needed)
-log.retention.hours=168
-message.max.bytes=1048576
-default.replication.factor=3
-min.insync.replicas=2
-
-Explanation of Key Parameters for Broker and Controller Nodes:
- * broker.id: A unique numerical identifier for each broker in the cluster. This is crucial for distinguishing brokers.
- * listeners: Defines the network interfaces and ports that the Kafka broker will listen on for incoming connections.
-   * SASL_PLAINTEXT://apphost01:9092: Listener for client connections using SASL for authentication but without SSL encryption.
-   * CONTROLLER://apphost01:9093: Dedicated listener for communication between the controller nodes.
- * advertised.listeners: The hostname and port that this broker advertises to clients. This is important if the internal hostname differs from what clients should use to connect.
- * inter.broker.listener.name: Specifies the listener name used for communication between brokers. We set it to SASL_PLAINTEXT to enforce authentication for inter-broker communication.
- * controller.quorum.voters: A comma-separated list of the controller nodes in the cluster. Each entry is in the format broker.id@hostname:port, where port is the port of the CONTROLLER listener. Ensure this list is identical on all Broker and Controller nodes.
- * controller.listener.names: Specifies the listener name used for communication between controller nodes. We set it to CONTROLLER.
- * security.inter.broker.protocol: Defines the security protocol used for communication between brokers. We set it to SASL_PLAINTEXT to enable SASL-based authentication.
- * sasl.mechanism.inter.broker.protocol: Specifies the SASL mechanism used for inter-broker authentication. We are using SCRAM-SHA-512.
- * principal.builder.class: The class used to build the principal object from the security information. The default class is usually sufficient.
- * sasl.enabled.mechanisms: A comma-separated list of SASL mechanisms enabled for client authentication. We are enabling SCRAM-SHA-512.
- * sasl.jaas.server.SCRAM-SHA-512: Java Authentication and Authorization Service (JAAS) configuration for the Kafka broker to authenticate using SCRAM-SHA-512.
-   * org.apache.kafka.common.security.scram.ScramLoginModule: The specific login module for SCRAM authentication.
-   * required: Indicates that authentication is required.
-   * username="kafka_broker": The username for the broker itself to authenticate with other brokers and controllers. You will need to create this user.
-   * password="<YOUR_BROKER_PASSWORD>": The password for the kafka_broker user. Replace this with a strong password.
- * authorizer.class.name: Specifies the authorizer class to use for access control. kafka.security.authorizer.AclAuthorizer enables the use of Access Control Lists (ACLs).
- * super.users: Optionally defines users who have unrestricted access to all resources. Use this cautiously.
- * log.dirs: The directory where Kafka will store its log segments.
- * log.retention.hours: How long Kafka should retain log data.
- * message.max.bytes: The maximum size of a message that the broker can receive.
- * default.replication.factor: The default number of replicas for newly created topics.
- * min.insync.replicas: The minimum number of in-sync replicas required for a write to be considered successful.
-Repeat this process for apphost02, apphost03, and apphost04, ensuring you change the broker.id to 2, 3, and 4 respectively, and update the hostnames in listeners, advertised.listeners, and potentially the sasl.jaas.server.SCRAM-SHA-512 if you choose to have different broker users per node (though a single kafka_broker user for all brokers is common).
-Configuration for Broker-Only Nodes (apphost05 - apphost12)
-Create a server.properties file on each of apphost05 through apphost12 with the following content, making sure to adjust the broker.id accordingly:
-Example server.properties for apphost05:
-# Unique ID for this broker. Must be different for each broker.
-broker.id=5
-
-# -------------------- Listener Configuration --------------------
-# Listeners for client connections. Use SASL_PLAINTEXT for secure communication.
-listeners=SASL_PLAINTEXT://apphost05:9092
-# The hostname and port advertised to clients. This should match the listeners.
-advertised.listeners=SASL_PLAINTEXT://apphost05:9092
-
-# Listener name used for inter-broker communication.
-inter.broker.listener.name=SASL_PLAINTEXT
-
-# -------------------- Controller Configuration --------------------
-# Enable the controller quorum.
-controller.quorum.voters=1@apphost01:9093,2@apphost02:9093,3@apphost03:9093,4@apphost04:9093
-
-# -------------------- Security Configuration --------------------
-# Security protocol for inter-broker communication.
-security.inter.broker.protocol=SASL_PLAINTEXT
-# SASL mechanism for inter-broker communication.
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
-
-# Class to use for building the principal.
-principal.builder.class=org.apache.kafka.security.auth.DefaultPrincipalBuilder
-
-# Enabled SASL mechanisms for client authentication.
-sasl.enabled.mechanisms=SCRAM-SHA-512
-
-# JAAS configuration for the Kafka broker to handle SCRAM authentication.
-# Replace <YOUR_KAFKA_USER> with the user running Kafka.
-sasl.jaas.server.SCRAM-SHA-512=org.apache.kafka.common.security.scram.ScramLoginModule required \
-        username="kafka_broker" \
-        password="<YOUR_BROKER_PASSWORD>" \
-        ;
-
-# Enable authorization using ACLs.
-authorizer.class.name=kafka.security.authorizer.AclAuthorizer
-
-# Define super users if needed. Replace <SUPER_USER_PRINCIPAL> with the principal name.
-# super.users=User:<SUPER_USER_PRINCIPAL>
-
-# -------------------- Log Configuration --------------------
-# Directory where Kafka will store its log data.
-log.dirs=/var/lib/kafka/data
-
-# Other common configurations (adjust as needed)
-log.retention.hours=168
-message.max.bytes=1048576
-default.replication.factor=3
-min.insync.replicas=2
-
-Explanation of Differences for Broker-Only Nodes:
- * broker.id: Unique ID from 5 to 12.
- * listeners: Only the client listener is needed. The CONTROLLER listener is absent as these nodes do not participate in the controller quorum.
- * advertised.listeners: Same as the client listener.
- * controller.quorum.voters: Crucially, this list is still required on broker-only nodes so they know where to find the active controllers.
- * controller.listener.names: This parameter is absent as these nodes are not controllers.
- * The rest of the security and log configurations are the same as the Broker and Controller nodes, ensuring consistent security settings across the cluster.
-Repeat this process for apphost06 through apphost12, ensuring you change the broker.id accordingly (6 to 12).
-Enabling SCRAM-SHA-512
-SCRAM-SHA-512 is enabled through the sasl.enabled.mechanisms and the JAAS configuration in the server.properties file.
-Key points:
- * sasl.enabled.mechanisms=SCRAM-SHA-512: This tells the Kafka broker to accept authentication requests using the SCRAM-SHA-512 mechanism.
- * sasl.jaas.server.SCRAM-SHA-512: This section in the JAAS configuration defines how the broker should authenticate clients and other brokers using SCRAM-SHA-512. It specifies the login module and its required parameters (username and password).
-Creating Kafka Users and Providing Connection Configuration
-You will need to use the kafka-configs.sh script to create users and set their SCRAM credentials. This script is typically located in the bin directory of your Kafka installation. You can run these commands from any of the Kafka nodes.
-1. Create the Broker User (kafka_broker):
-This user is used for inter-broker and controller communication.
-./bin/kafka-configs.sh --bootstrap-server apphost01:9092,apphost02:9092,apphost03:9092,apphost04:9092 --alter --entity-type users --entity-name kafka_broker --command-config config/admin/client.properties --add-config 'SCRAM-SHA-512=[password=<YOUR_BROKER_PASSWORD>],SCRAM-SHA-256=[password=<YOUR_BROKER_PASSWORD>]'
-
-Explanation:
- * --bootstrap-server: Specifies a list of Kafka brokers to connect to for configuration changes.
- * --alter: Indicates that you are modifying an existing entity (in this case, creating a new user).
- * --entity-type users: Specifies that you are working with user configurations.
- * --entity-name kafka_broker: The name of the user you are creating.
- * --command-config config/admin/client.properties: Specifies a client configuration file to use for connecting to the Kafka cluster. You might need to create or modify this file to include authentication details if your initial connection requires it. For creating the first user, you might not need it if no authentication is enforced yet. However, for subsequent user creations, you will likely need to authenticate.
- * --add-config 'SCRAM-SHA-512=[password=<YOUR_BROKER_PASSWORD>],SCRAM-SHA-256=[password=<YOUR_BROKER_PASSWORD>]': Adds the SCRAM credentials for the user. Replace <YOUR_BROKER_PASSWORD> with the same strong password you used in the server.properties file. We are adding both SHA-512 and SHA-256 for potential client compatibility.
-2. Create Application Users (e.g., producer_user, consumer_user):
-Replace <YOUR_PRODUCER_PASSWORD> and <YOUR_CONSUMER_PASSWORD> with strong passwords for your application users.
-./bin/kafka-configs.sh --bootstrap-server apphost01:9092,apphost02:9092,apphost03:9092,apphost04:9092 --alter --entity-type users --entity-name producer_user --command-config config/admin/client.properties --add-config 'SCRAM-SHA-512=[password=<YOUR_PRODUCER_PASSWORD>],SCRAM-SHA-256=[password=<YOUR_PRODUCER_PASSWORD>]'
-
-./bin/kafka-configs.sh --bootstrap-server apphost01:9092,apphost02:9092,apphost03:9092,apphost04:9092 --alter --entity-type users --entity-name consumer_user --command-config config/admin/client.properties --add-config 'SCRAM-SHA-512=[password=<YOUR_CONSUMER_PASSWORD>],SCRAM-SHA-256=[password=<YOUR_CONSUMER_PASSWORD>]'
-
-You can create as many application users as needed, each with their own specific permissions (configured using ACLs).
-Important: After creating users, you will need to set appropriate ACLs to control what topics and groups these users can access. You can use the kafka-acls.sh script for this.
-3. Connection Configuration for Kafka Clients:
-To connect to the Kafka cluster with SCRAM-SHA-512 authentication, your Kafka clients will need to be configured with the following information:
- * Bootstrap Servers: A comma-separated list of your Kafka brokers. It's good practice to include multiple brokers for redundancy:
-   apphost01:9092,apphost02:9092,apphost03:9092,apphost04:9092
-
- * Security Protocol: Set to SASL_PLAINTEXT.
- * SASL Mechanism: Set to SCRAM-SHA-512.
- * SASL JAAS Config: Provide the JAAS configuration with the username and password for the specific user. This can be done programmatically or through a configuration file.
-Example Java Client Configuration:
-Properties props = new Properties();
-props.put(CommonClientConfigs.BOOTSTRAP_SERVERS_CONFIG, "apphost01:9092,apphost02:9092,apphost03:9092,apphost04:9092");
-props.put(CommonClientConfigs.SECURITY_PROTOCOL_CONFIG, "SASL_PLAINTEXT");
-props.put("sasl.mechanism", "SCRAM-SHA-512");
-props.put("sasl.jaas.config", "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"producer_user\" password=\"<YOUR_PRODUCER_PASSWORD>\";");
-
-// For a producer:
-props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
-KafkaProducer<String, String> producer = new KafkaProducer<>(props);
-
-// For a consumer:
-props.put(ConsumerConfig.GROUP_ID_CONFIG, "my-consumer-group");
-props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
-
-Explanation of Connection Configuration:
- * bootstrap.servers: The initial set of brokers to discover the full cluster topology.
- * security.protocol: Specifies the security protocol to use. SASL_PLAINTEXT indicates SASL authentication without SSL encryption. If you need encryption, you would use SASL_SSL and configure SSL certificates as well.
- * sasl.mechanism: The SASL mechanism used for authentication. We are using SCRAM-SHA-512.
- * sasl.jaas.config: Provides the JAAS configuration string. It specifies the login module (ScramLoginModule), the required option, and the username and password for the user. Replace <YOUR_PRODUCER_PASSWORD> with the actual password for the producer_user (and similarly for other users).
-Why These Configurations Are Needed
- * broker.id: Essential for uniquely identifying each broker within the cluster. This is used for internal communication, leader election, and tracking replicas.
- * listeners and advertised.listeners: Define how clients and other brokers can connect to the Kafka instance. advertised.listeners is crucial when the internal network configuration differs from the external view.
- * controller.quorum.voters: In KRaft mode, this defines the set of nodes that can participate in the controller quorum. All Broker and Controller nodes need this to know who the potential controllers are.
- * controller.listener.names: Specifies the listener used for internal controller communication, allowing you to isolate this traffic.
- * inter.broker.listener.name: Defines the listener used for communication between brokers, allowing you to enforce security protocols on this internal traffic.
- * security.inter.broker.protocol and sasl.mechanism.inter.broker.protocol: Enforce authentication between brokers, preventing unauthorized brokers from joining the cluster and potentially compromising data.
- * sasl.enabled.mechanisms: Specifies the authentication mechanisms that the broker will accept from clients. Using SCRAM-SHA-512 provides a strong, password-based authentication method.
- * sasl.jaas.server.SCRAM-SHA-512: Configures the server-side of the SCRAM authentication process, defining how the broker should verify user credentials.
- * authorizer.class.name: Enables authorization, allowing you to control which users can perform which actions (e.g., produce to specific topics, consume from specific groups).
- * log.dirs: Specifies where Kafka stores its data. It's crucial for persistence and recovery.
- * default.replication.factor and min.insync.replicas: These settings ensure data durability and consistency by controlling how many copies of each topic partition are maintained and how many must acknowledge a write for it to be considered successful.
- * Client Connection Configuration: The client-side configurations ensure that your applications can securely connect to the Kafka cluster by providing the necessary authentication credentials and security protocols.
-By following these steps, you will have a secure Kafka cluster running in KRaft mode with SCRAM-SHA-512 authentication enabled. Remember to replace the placeholder passwords with strong, unique values and to configure appropriate ACLs for your application users. Also, ensure that the Kafka processes are started on all 12 nodes using the respective server.properties files.
+**Explanation and Key Points:**
+
+1.  **Download and Extract:** Downloads and extracts Kafka 3.9.0.
+2.  **Data Directory:** Creates the directory for Kafka data.
+3.  **Node ID:** Generates a unique node ID.
+4.  **Generate SSL Certificates:**
+    * `keytool` is used to create self-signed certificates for testing.
+    * **For production, replace these with certificates from a trusted CA.**
+    * `kafka.keystore.jks`: Contains the Kafka broker's private key and certificate.
+    * `kafka.truststore.jks`: Contains the trusted certificates (in this case, the broker's own certificate).
+    * The passwords for both keystore and truststore are set to "kafkastore" for testing.
+5.  **Server Configuration:**
+    * `listeners=SSL://localhost:9094`: Enables SSL on port 9094.
+    * `advertised.listeners=SSL://localhost:9094`: Advertises the SSL listener to clients.
+    * `security.inter.broker.protocol=SSL`: Enables SSL for inter-broker communication.
+    * `listener.security.protocol.map=SSL:SSL`: Maps the SSL listener to the SSL protocol.
+    * `ssl.keystore.location`, `ssl.keystore.password`, `ssl.truststore.location`, `ssl.truststore.password`: Specifies the locations and passwords for the keystore and truststore.
+    * `ssl.client.auth=none`: Disables client authentication. You can set it to `requested` or `required` for mutual TLS.
+6.  **Start Kafka Server:** Starts the Kafka broker.
+7.  **Client Configuration:**
+    * `producer.properties`, `consumer.properties`, and `admin-client.properties`: Configure the clients to use SSL.
+    * `ssl.truststore.location` and `ssl.truststore.password`: Specifies the truststore for the clients.
+8.  **Create Topic:** Creates the `my-ssl-topic` topic.
+9.  **Produce Messages:** Produces messages to the topic over SSL.
+10. **Consume Messages:** Consumes messages from the topic over SSL.
+11. **Describe Topic:** Describes the topic.
+
+**Important Notes:**
+
+* **Production Certificates:** Replace the self-signed certificates with certificates from a trusted CA for production use.
+* **Client Authentication:** Consider enabling client authentication (`ssl.client.auth=required`) for enhanced security.
+* **Port Numbers:** Adjust the port numbers as needed.
+* **Keystore/Truststore Security:** Store the keystore and truststore files securely.
+* **Firewall:** Ensure that the necessary ports are open in your firewall.
+* **Hostnames/IP Addresses:** Replace `localhost` with the appropriate hostnames or IP addresses.
+* **KRAFT:** This configuration is for Kafka KRAFT mode.
+* **No Zookeeper:** This configuration does not use Zookeeper.
