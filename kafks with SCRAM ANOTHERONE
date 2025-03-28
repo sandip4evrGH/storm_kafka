@@ -128,4 +128,70 @@ If everything is configured correctly, you should be able to produce and consume
 - **Multiple Nodes:** For a multi-node setup, adjust `controller.quorum.voters` (e.g., `1@host1:9093,2@host2:9093,3@host3:9093`) and ensure each node has a unique `node.id`. Format each node’s storage with the same cluster ID and credentials.
 - **SCRAM Variants:** You can use `SCRAM-SHA-512` instead of `SCRAM-SHA-256` by updating the mechanism in the configuration and formatting command.
 
-This setup provides a functional Kafka instance in KRaft mode with SCRAM authentication over plaintext, as requested. Let me know if you need further clarification!
+This setup provides a functional Kafka instance in KRaft mode with SCRAM authentication over plaintext, as requested. Let me know if you need further clarification
+
+
+
+
+
+
+Configure kafka 3.9 with KRAFT without using zookeeper and add SCRAM-.. 2.0 Flash 
+'lease provide all configuration and commands again to a text file that i can download A 
+text 
+# kafka-3.9.0-kraft-sasl-ssl-config.txr 
+## 1. Generate SSL Certificates 
+### a) Create the Broker Keystore keytool -genkeypair -alias broker -keyalg RSA -keysize 2048 -validity 65 -keystore broker.keystore.jks -storepass broker-secret -keypass broker-secret -dnane "CN=your_broker_hostname, OU=Kafka, 0=YourOrg L=YourCity. ST=YourState, C=US" # Replace 'your_broker_hostname' "YourOrg', "YourCity". 'YourState', 'US' with your actual details. # Keep 'broker-secret' consistent or use your preferred password. 
+### b) Export the Broker Certificate: kevtool -export -alias broker -file broker.cer -keystore broker.keystore.jks -storepass broker-secret -rfo 
+### c) Create the Client Keystore and Truststore: keytool -genkeypair -alias client -keyalg RSA -keysize 2048 -validity 365 -keystore client.keystore.jks -storepass client-secret -keypass client-secret dname "CN=client. OU=Kafka, 0=Yourorg. L=YourCity, ST=YourState, C=US" -alias client -file client.cer -keys tore kevtool -export client.keystore.jks -storepass client-secret -rfc 
+#H# d) Import Certificates into Truststores: keytool -import -alias broker -file broker.cer -keystore client.truststore.jks -storepass client-secret -trustcacerts keytool -import -alias client -file client.cer -keystore proker.truststore.jks -storepass broker-secret -trustcacerts 
+## 2. Updated server.properties (for Kafka 3.9 with KRAFT, SASL_SSL only) 
+. . properties # # ##"#"##"############### Server Basics ########################## 
+process.roles=broker.controller rode.id=1 # Replace with a unique ID for each broker in your clus ter 
+"############################ KRAFT Configuratior ###"t""""" """"""#"#"""###"# 
+controller.quorum.voters=1@your_broker_address:9093 # Replace your_broker_address with your broker's actual address and port. List all controller nodes for a cluster (e.8., 1@broker1:9093,2@broker2:9093 .3@broker 3:9093) controller.listener.names=CONTROLLER controller.advertised.listeners=CONTROLLER://your_broker_address:9093 # Replace with your broker's actual address 
+"##""""""""""""""""""""""##" LiSteners ##"##""""""""""""""""""""""#A 
+listeners=SASL_SSL://0.0.0.0:9093 advertised.listeners=SASL_SSL://your_public_or_private_ip:9093 #Replace with the actual accessible address for clients and other brokers listener.security.protocol.map=SASL_SSL:SASL_SSL.CONTROLLER:SSI inter.broker.listener.name=SASL_SSL 
+H HH HHHH"#H#H#HH""#"## SSL Configuratior ##""#"#""############### 
+sl.keystore.location=/path/to/your/broker.keystore.jks # Replace with the actual path ssl.keystore.password=broker-secre ssl.key.password=broker-secret ssl.truststore.location=/path/to/your/broker.truststore.jks # Replace with the actual path ssl.truststore.password=broker-secre ssl.endpoint.identification.algorithn= 
+"####"##"#"#"###"#"#"""###"# SCRAM-SHA-512 Configuration ###"t""""" """##""####"###### 
+authorizer.class.name=kafka.security.authorizer.AclAuthorizer allow.everyone.if.no.acl.found=false super.users=User:admin # Replace "admin' with your desired superuser principal 
+# ##"#"#"""HH############# Controller Configuration (if this broker also a controller) ############################ controller.quorum.election.timeout.ms=1000 controller.quorum.fetch.timeout.ms=1000 controller.socket.timeout.ms=3000d 
+is 
+##H""HHH"HHHH"HH#H###### Other Broker Settings (adjust as needed #"""""""""""""""""""""""# log.dirs=/tmp/kafka-logs num.partitions=1 default.replication.factor= transaction.state.log.replication.factor=1 transaction.state.log.min.isr=1 
+Remember to replace the placeholder paths and addresses with your actual values 
+3. Updated config/admin.properties 
+properties 
+security.protocol=SASL_SSL ssl.truststore.location=/path/to/your/broker.truststore.jk: ssl.truststore.password-broker-secret sasl.mechanism=SCRAM-SHA-512 sasl.jaas.config=org.apache.kafka.common.security.scram.scramLoginModule required username="admin" password="your-admin-password"; # Replace with your superuser credentials 
+Replace/path/to/your/broker.truststore.jksand"your-admin-password" accordingly, 
+4. Updated Client Configuration Examples 
+config/producer.properties 
+properties 
+security.protocol=SASL_SSL 
+ssl.truststore.location=/path/to/your/client.truststore.jk= ssl.truststore.password=client-secret sasl.mechanism=SCRAM-SHA-512 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required usernames 'your-username" password="your-password"; # Replace with the user's credentials 
+config/consumer.properties 
+properties 
+security.protocol=SASL_SSL ssl.truststore.location=/path/to/your/client.truststore.jks ssl.truststore.password=client-secret sasi.mechanism=SCRAM-SHA-512 ;asl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginMlodule required username="your-username" password="your-password"; Replace with the user's credentials 
+Replace the placeholder paths, usernames, and passwords in both client configuration file 
+5. Commands to Start Kafka Broker and Use Admin Tools 
+Start Kafka Broker: 
+bash 
+bin/kafka-server-start.sh config/server.properties 
+Create a Kafka User (using admin.properties): 
+bash 
+pin/kafka-configs.sh --bootstrap-server your_broker_address:9093 --command-config config/admin.properties --alter --entity-type user --entity-name your-username --add-config 'sasl.mechanism=SCRAM-SHA-512,sa sl.jaas.config="org.apache.kafka.common.security.scram.ScramLoginModule required username=I"your-username\" password=I"your-passworc # Replace '"your_broker_address', 'your-username`, and 'your-password". 
+Grant Produce Permission (using admin.properties): 
+bash 
+pin/kafka-acls.sh --bootstrap-server your_broker_address:909: A command-config config/admin.properties --allow --principal Jser:your-username --producer --topic my-topic # Replace 'your_broker_address', 'your-username', and "my-topic" 
+Grant Consume Permission (using admin.properties) 
+bash 
+bin/kafka-acls.sh --bootstrap-server your_broker_address:9093 --command-config config/admin.properties --allow --principal Jser:your-username --consumer --topic my-topic --group my-group # Replace 'your_broker_address", 'your-username' "my-topic", and "my-group' 
+Start Console Producer (using producer.properties): 
+bash 
+pin/kafka-console-producer.sh --bootstrap-server your_broker_address:9093 --topic my-topic --producer.config config/producer.properties # Replace 'your_broker_address' and "my-topic". 
+Start Console Consumer (using consumer.properties): 
+bash 
+pin/kafka-console-consumer.sh --bootstrap-server your_broker_address:9093 --topic my-topic --group my-group --from-beginning --consumer.config config/consumer.properties # Replace 'your_broker_address", 'my-topic", and 'my-group. 
+Make sure to adjust the paths, hostnames, username: passwords, and topic/group names according to your environment 
+You can copy and paste the content of this text block into a .txt" file on your local machine. Remember to replace all the placeholder values with your actual configuration details. 
+Sources and related conten ^ www.coreui.cn github.com 3 www.coreui.cn github.com G G Talk to Gemini hands-free Setup "Hey Google" to start a chat with just your voice Not now Set up + ASk Gemini 
+Gemini can make mistakes, so double-check it
