@@ -110,3 +110,84 @@ bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-
 * **Hostnames/IP Addresses:** Replace `localhost` with the appropriate hostnames or IP addresses.
 * **KRAFT:** This configuration is for Kafka KRAFT mode.
 * **No Zookeeper:** This configuration does not use Zookeeper.
+
+
+
+
+
+
+
+# 1. Download and Extract Kafka 3.9.0
+wget https://downloads.apache.org/kafka/3.9.0/kafka_2.13-3.9.0.tgz
+tar -xzf kafka_2.13-3.9.0.tgz
+cd kafka_2.13-3.9.0
+
+# 2. Create Kafka Data Directory
+mkdir -p /var/lib/kafka-data
+
+# 3. Generate Node ID
+NODE_ID=$(uuidgen)
+
+# 4. Generate SSL Certificates (Self-Signed for Testing)
+# Replace with proper certificates for production
+KEYSTORE_PASS="kafkastore"
+TRUSTSTORE_PASS="kafkastore"
+
+keytool -genkey -alias kafka -keyalg RSA -keystore kafka.keystore.jks -validity 365 -storepass $KEYSTORE_PASS -dname "CN=localhost"
+keytool -export -alias kafka -keystore kafka.keystore.jks -file kafka.cer -storepass $KEYSTORE_PASS
+keytool -import -alias kafka -file kafka.cer -keystore kafka.truststore.jks -storepass $TRUSTSTORE_PASS
+
+# 5. Server Configuration (config/kraft/server.properties) - SSL Only
+cat <<EOF > config/kraft/server.properties
+node.id=$NODE_ID
+process.roles=broker,controller
+controller.quorum.voters=$NODE_ID@localhost:9093
+listeners=CONTROLLER://localhost:9093,SSL://localhost:9094
+advertised.listeners=SSL://localhost:9094
+log.dirs=/var/lib/kafka-data
+security.inter.broker.protocol=SSL
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,SSL:SSL
+ssl.keystore.location=kafka.keystore.jks
+ssl.keystore.password=$KEYSTORE_PASS
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+ssl.client.auth=none # or requested or required
+zookeeper.connect=unused
+EOF
+
+# 6. Start Kafka Server
+bin/kafka-server-start.sh config/kraft/server.properties
+
+# 7. Client Configuration (producer.properties, consumer.properties, admin-client.properties)
+
+cat <<EOF > config/producer.properties
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+EOF
+
+cat <<EOF > config/consumer.properties
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+EOF
+
+cat <<EOF > config/admin-client.properties
+security.protocol=SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+EOF
+
+# 8. Create Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-ssl-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
+
+# 9. Produce Messages (SSL)
+bin/kafka-console-producer.sh --bootstrap-server localhost:9094 --topic my-ssl-topic --producer.config config/producer.properties
+
+# 10. Consume Messages (SSL)
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-ssl-topic --from-beginning --consumer.config config/consumer.properties
+
+# 11. Describe Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-topic --command-config config/admin-client.properties
+
+
