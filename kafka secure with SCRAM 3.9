@@ -191,3 +191,133 @@ bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-ssl-t
 bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-topic --command-config config/admin-client.properties
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```bash
+# 1. Download and Extract Kafka 3.9.0
+wget https://downloads.apache.org/kafka/3.9.0/kafka_2.13-3.9.0.tgz
+tar -xzf kafka_2.13-3.9.0.tgz
+cd kafka_2.13-3.9.0
+
+# 2. Create Kafka Data Directory
+mkdir -p /var/lib/kafka-data
+
+# 3. Generate Node ID
+NODE_ID=$(uuidgen)
+
+# 4. Generate SSL Certificates (Self-Signed for Testing)
+# Replace with proper certificates for production
+KEYSTORE_PASS="kafkastore"
+TRUSTSTORE_PASS="kafkastore"
+
+keytool -genkey -alias kafka -keyalg RSA -keystore kafka.keystore.jks -validity 365 -storepass $KEYSTORE_PASS -dname "CN=localhost"
+keytool -export -alias kafka -keystore kafka.keystore.jks -file kafka.cer -storepass $KEYSTORE_PASS
+keytool -import -alias kafka -file kafka.cer -keystore kafka.truststore.jks -storepass $TRUSTSTORE_PASS
+
+# 5. Generate User Passwords
+PASSWORD=$(openssl rand -base64 32)
+ADMIN_PASSWORD=$(openssl rand -base64 32)
+
+# 6. Server Configuration (config/kraft/server.properties) - SSL and SCRAM, no PLAINTEXT
+cat <<EOF > config/kraft/server.properties
+node.id=$NODE_ID
+process.roles=broker,controller
+controller.quorum.voters=$NODE_ID@localhost:9093
+listeners=SSL://localhost:9093,SASL_SSL://localhost:9094
+advertised.listeners=SASL_SSL://localhost:9094
+log.dirs=/var/lib/kafka-data
+security.inter.broker.protocol=SASL_SSL
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.enabled.mechanisms=SCRAM-SHA-512
+listener.security.protocol.map=SSL:SSL,SASL_SSL:SASL_SSL
+ssl.keystore.location=kafka.keystore.jks
+ssl.keystore.password=$KEYSTORE_PASS
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+ssl.client.auth=required # or requested or none. required is recommended for production
+zookeeper.connect=unused
+EOF
+
+# 7. Start Kafka Server
+bin/kafka-server-start.sh config/kraft/server.properties
+
+# 8. Create Kafka Users (AFTER Kafka start)
+bin/kafka-configs.sh --bootstrap-server localhost:9093 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$PASSWORD]' --entity-type users --entity-name myuser
+bin/kafka-configs.sh --bootstrap-server localhost:9093 --alter --add-config 'SCRAM-SHA-512=[iterations=8192,password=$ADMIN_PASSWORD]' --entity-type users --entity-name admin
+
+# 9. Client Configuration (producer.properties, consumer.properties, admin-client.properties) - SSL and SCRAM
+
+cat <<EOF > config/producer.properties
+security.protocol=SASL_SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
+EOF
+
+cat <<EOF > config/consumer.properties
+security.protocol=SASL_SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="myuser" password="$PASSWORD";
+EOF
+
+cat <<EOF > config/admin-client.properties
+security.protocol=SASL_SSL
+ssl.truststore.location=kafka.truststore.jks
+ssl.truststore.password=$TRUSTSTORE_PASS
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="$ADMIN_PASSWORD";
+EOF
+
+# 10. Create Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --topic my-ssl-scram-topic --partitions 1 --replication-factor 1 --command-config config/admin-client.properties
+
+# 11. Produce Messages (SSL and SCRAM)
+bin/kafka-console-producer.sh --bootstrap-server localhost:9094 --topic my-ssl-scram-topic --producer.config config/producer.properties
+
+# 12. Consume Messages (SSL and SCRAM)
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9094 --topic my-ssl-scram-topic --from-beginning --consumer.config config/consumer.properties
+
+# 13. Describe Topic (Admin)
+bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-scram-topic --command-config config/admin-client.properties
+```
+
+**Key Changes:**
+
+* **No PLAINTEXT:**
+    * `listeners=SSL://localhost:9093,SASL_SSL://localhost:9094`: The PLAINTEXT listener has been removed, and the controller listener has been changed to use SSL.
+    * `listener.security.protocol.map=SSL:SSL,SASL_SSL:SASL_SSL`: The plaintext mapping has been removed.
+* **Controller Listener SSL:**
+    * The controller listener now uses SSL on port 9093. This is for all inter broker and controller communication.
+* **SSL Client Authentication:**
+    * `ssl.client.auth=required`: Client authentication is now required.
+* **User creation port:**
+    * The user creation commands now use port 9093, since that is the SSL enabled controller port.
+
+**Important Notes:**
+
+* Production Certificates are still required for production.
+* Client authentication is required in this setup.
+* All inter broker and client communication is now SSL enabled.
+* The user creation commands must be run after the kafka broker is started.
+
+
+
+
