@@ -321,3 +321,161 @@ bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic my-ssl-
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+You got it! Let's consolidate all that goodness into a text file structure you can easily work with for your Kafka 3.9 KRAFT setup with SASL_SSL and ACLs.
+Here's how the kafka_secure_setup.txt file would look:
+# Kafka 3.9 KRAFT Setup with SASL_SSL and ACLs
+
+## 1. Broker Configuration (server.properties)
+
+```properties
+broker.id=0
+process.roles=broker,controller
+node.id=0
+
+listeners=SASL_SSL://localhost:9092,CONTROLLER://localhost:9093
+advertised.listeners=your_public_ip:9092 # Replace with your broker's public IP or resolvable hostname
+inter.broker.listener.name=SASL_SSL
+controller.listener.names=CONTROLLER
+
+log.dirs=/tmp/kafka-logs
+
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+
+default.replication.factor=3
+min.insync.replicas=2
+
+controller.quorum.voters=0@localhost:9093 # List of controller nodes (node.id@host:port)
+
+security.inter.broker.protocol=SASL_SSL
+
+sasl.mechanism.inter.broker.protocol=PLAIN # Or SCRAM-SHA-256/SCRAM-SHA-512 for stronger security
+sasl.enabled.mechanisms=PLAIN # Or SCRAM-SHA-256/SCRAM-SHA-512
+
+ssl.protocol=TLSv1.3 # Or TLSv1.2
+ssl.enabled.protocols=TLSv1.2,TLSv1.3
+ssl.endpoint.identification.algorithm=https # Recommended for production
+ssl.truststore.location=/path/to/your/kafka.truststore.jks # Replace with the actual path
+ssl.truststore.password=your_truststore_password # Replace with your truststore password
+ssl.keystore.location=/path/to/your/kafka.keystore.jks # Replace with the actual path
+ssl.keystore.password=your_keystore_password # Replace with your keystore password
+ssl.key.password=your_key_password # Replace with your key password (if different from keystore password)
+
+authorizer.class.name=kafka.security.authorizer.AclAuthorizer
+allow.everyone.if.no.acl.found=false # Important for enabling ACLs
+
+Explanation of Broker Properties:
+ * broker.id: A unique numerical ID for each broker in the Kafka cluster.
+ * process.roles: Defines the roles this process will fulfill. In a KRAFT setup, a node can be both a broker and a controller.
+ * node.id: The unique ID of this node, must match broker.id when a node serves as both broker and controller.
+ * listeners: The network addresses the Kafka broker will listen on.
+   * SASL_SSL://localhost:9092: Listens for client connections using SASL for authentication and SSL/TLS for encryption.
+   * CONTROLLER://localhost:9093: Listens for internal controller communication.
+ * advertised.listeners: The addresses clients will use to connect to the broker. This is crucial if your clients are on a different network than your brokers. Replace your_public_ip with the actual accessible address.
+ * inter.broker.listener.name: The listener name used for communication between brokers.
+ * controller.listener.names: The listener name used for communication with the active controller.
+ * log.dirs: The directory where Kafka will store its log data.
+ * offsets.topic.replication.factor: The replication factor for the internal __consumer_offsets topic. Higher values provide better fault tolerance.
+ * transaction.state.log.replication.factor: The replication factor for the internal transaction state log.
+ * transaction.state.log.min.isr: The minimum number of in-sync replicas required for the transaction state log to acknowledge a write.
+ * default.replication.factor: The default replication factor for newly created topics.
+ * min.insync.replicas: The minimum number of in-sync replicas required for a broker to acknowledge a write request. This prevents data loss.
+ * controller.quorum.voters: A list of all controller nodes in the Kafka cluster, in the format node.id@host:port. If you have multiple controllers, list them all here (e.g., 0@host1:9093,1@host2:9093).
+ * security.inter.broker.protocol: The protocol used for communication between brokers.
+ * sasl.mechanism.inter.broker.protocol: The SASL mechanism used for inter-broker authentication. PLAIN is basic, consider SCRAM-SHA-256 or SCRAM-SHA-512 for better security in production.
+ * sasl.enabled.mechanisms: The SASL mechanisms enabled for client authentication.
+ * ssl.protocol: The highest SSL/TLS protocol version the broker will support.
+ * ssl.enabled.protocols: The specific SSL/TLS protocol versions enabled. It's good practice to disable older, less secure protocols.
+ * ssl.endpoint.identification.algorithm: Enables hostname verification, which is recommended to prevent man-in-the-middle attacks.
+ * ssl.truststore.location: The path to the Java truststore file containing the certificates of trusted entities (e.g., Certificate Authorities or other brokers). Replace with the actual path.
+ * ssl.truststore.password: The password for the truststore. Replace with your truststore password.
+ * ssl.keystore.location: The path to the Java keystore file containing the broker's own certificate and private key. Replace with the actual path.
+ * ssl.keystore.password: The password for the keystore. Replace with your keystore password.
+ * ssl.key.password: The password for the private key within the keystore (if different from the keystore password). Replace with your key password (if different).
+ * authorizer.class.name: Specifies the authorizer implementation to use. kafka.security.authorizer.AclAuthorizer enables ACL-based authorization.
+ * allow.everyone.if.no.acl.found: When set to false, any operation without a corresponding ACL will be denied. This is crucial for enforcing security.
+2. Client Configuration (client.properties)
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN # Or SCRAM-SHA-256/SCRAM-SHA-512 to match broker
+ssl.truststore.location=/path/to/your/client.truststore.jks # Replace with the actual path
+ssl.truststore.password=your_client_truststore_password # Replace with your truststore password
+
+# SASL username and password for authentication
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="testuser" password="testpassword";
+
+# Bootstrap servers (replace with your broker address(es))
+bootstrap.servers=your_public_ip:9092
+
+Explanation of Client Properties:
+ * security.protocol: Specifies the security protocol to use when communicating with the broker. Must match the broker's listener configuration (SASL_SSL).
+ * sasl.mechanism: The SASL mechanism to use for authentication. Must match one of the mechanisms enabled on the broker.
+ * ssl.truststore.location: The path to the client's truststore file, containing the certificates of the Kafka brokers. Replace with the actual path.
+ * ssl.truststore.password: The password for the client's truststore. Replace with your truststore password.
+ * sasl.jaas.config: Configuration for the Java Authentication and Authorization Service (JAAS). This specifies the login module to use (PlainLoginModule for the PLAIN mechanism) and provides the username and password for authentication. Replace "testuser" and "testpassword" with the actual credentials for the user you are testing.
+ * bootstrap.servers: A comma-separated list of host and port pairs that are the addresses of the Kafka brokers. The client will contact these initial servers to discover the full set of brokers in the cluster. If you have multiple brokers, list them here (e.g., your_public_ip1:9092,your_public_ip2:9092).
+3. Adding Testing Users and Setting ACLs
+You can manage users and ACLs using the Kafka command-line tools.
+For PLAIN SASL Mechanism:
+You need to configure users directly in the broker's JAAS configuration file. Create a file (e.g., kafka_server_jaas.conf) with the following content:
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="user1" password="password1"
+  username="user2" password="password2";
+};
+
+Then, when starting the Kafka broker, include the following JVM option:
+-Djava.security.auth.login.config=/path/to/your/kafka_server_jaas.conf
+
+For SCRAM-SHA-256 or SCRAM-SHA-512 (recommended for production):
+Use the kafka-configs.sh command:
+./bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users --entity-name user1 --add-config 'SCRAM-SHA-256=[password=user1secret]'
+./bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type users --entity-name user2 --add-config 'SCRAM-SHA-512=[password=user2secure]'
+
+Setting ACLs:
+Use the kafka-acls.sh command to grant permissions to the users.
+ * Allow user1 to produce to topic test-topic:
+   ./bin/kafka-acls.sh --bootstrap-server localhost:9092 --add --allow-principal User:user1 --producer --topic test-topic
+
+ * Allow user2 to consume from topic test-topic in group my-group:
+   ./bin/kafka-acls.sh --bootstrap-server localhost:9092 --add --allow-principal User:user2 --consumer --topic test-topic --group my-group
+
+ * Allow user1 to create topics:
+   ./bin/kafka-acls.sh --bootstrap-server localhost:9092 --add --allow-principal User:user1 --operation Create --cluster
+
+ * Deny user2 from deleting topics:
+   ./bin/kafka-acls.sh --bootstrap-server localhost:9092 --add --deny-principal User:user2 --operation Delete --cluster
+
+Listing Existing ACLs:
+./bin/kafka-acls.sh --bootstrap-server localhost:9092 --list
+
+Removing ACLs:
+Use the --remove option with similar parameters used for adding.
+4. Testing Connection and ACLs
+Here are the commands to test the connection and verify the ACLs are working as expected. Make sure you have created client configuration files (client.properties or variations) with the appropriate sasl.jaas.config for each user you are testing.
+Test Producer (as user1):
+./bin/kafka-console-producer.sh --bootstrap-server your_public_ip:9092 --topic test-topic --producer.config /path/to/client_user1.properties
+
+Test Producer (as user2 - should fail):
+./bin/kafka-console-producer.sh --bootstrap-server your_public_ip:9092 --topic test-topic --producer.config /path/to/client_user2.properties
+
+Test Consumer (as user2, group my-group):
+./bin/kafka-console-consumer.sh --bootstrap-server your_public_ip:9092 --topic test-topic --group my-group --consumer.config /path/to/client_user2.properties --from-beginning
+
+Test Consumer (as user1, group my-group - should fail):
+./bin/kafka-console-consumer.sh --bootstrap-server your_public_ip:9092 --topic test-topic --group my-group --consumer.config /path/to/client_user1.properties --from-beginning
+
+Remember to replace all the placeholder paths and passwords with your actual values!
+You can save this entire content into a text file named kafka_secure_setup.txt. This should give you a clear and organized reference for setting up your secure Kafka environment with KRAFT. Let me know if you need any adjustments or further details!
