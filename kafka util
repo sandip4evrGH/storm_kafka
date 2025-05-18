@@ -486,3 +486,577 @@ Environment: PROD3
 Environment: PROD4
   Short: WEB, Enrichment: E, Region: AMRS, Date: 20250516, Full: WEB.E.amrs.prod4.2025
 
+
+
+ssh to get kafka topic size
+
+import subprocess
+import argparse
+import sys
+import re
+
+def get_ssh_password_from_file(password_file):
+    """Reads the SSH password from the first line of a file."""
+    try:
+        with open(password_file, 'r') as f:
+            password = f.readline().strip()
+        return password
+    except FileNotFoundError:
+        print(f"Error: Password file not found: {password_file}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading password file: {e}")
+        sys.exit(1)
+
+def get_topic_partition_sizes_simple_ssh(env, host, username, password, topic_name):
+    """
+    Connects to a remote host via simple SSH, retrieves the log directory sizes
+    for each partition of a Kafka topic, and calculates the total size.
+
+    Args:
+        env (str): The environment name (for logging/identification).
+        host (str): The hostname or IP address of the Kafka broker.
+        username (str): The SSH username.
+        password (str): The SSH password.
+        topic_name (str): The name of the Kafka topic.
+
+    Returns:
+        dict: A dictionary containing partition sizes in bytes and the total
+              size in GB. Returns None if an error occurs.
+              Example:
+              {
+                  'partitions': {
+                      '0': 123456789,
+                      '1': 987654321
+                  },
+                  'total_size_gb': 1.02
+              }
+    """
+    partition_sizes = {}
+    total_size_bytes = 0
+
+    try:
+        # Construct the command to find the log directories for the topic
+        command_find = f"ssh {username}@{host} 'find /var/lib/kafka-logs/{topic_name}-* -maxdepth 0 -type d -printf \"%f\\n\"'"
+        process_find = subprocess.Popen(command_find, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout_find, stderr_find = process_find.communicate(input=password + '\n') # Provide password via stdin
+        if process_find.returncode != 0:
+            print(f"[{env}] Error listing partitions on {host}: {stderr_find.strip()}")
+            return None
+        topic_partitions = [line.strip() for line in stdout_find.strip().split('\n') if line.strip()]
+
+        for partition_dir in topic_partitions:
+            match = re.match(f"{re.escape(topic_name)}-(\d+)", partition_dir)
+            if match:
+                partition_id = match.group(1)
+                command_du = f"ssh {username}@{host} 'du -sb /var/lib/kafka-logs/{partition_dir}'"
+                process_du = subprocess.Popen(command_du, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout_du, stderr_du = process_du.communicate(input=password + '\n') # Provide password via stdin
+                if process_du.returncode == 0:
+                    size_output = stdout_du.readline().strip()
+                    if size_output:
+                        try:
+                            size_bytes = int(size_output.split('\t')[0])
+                            partition_sizes[partition_id] = size_bytes
+                            total_size_bytes += size_bytes
+                        except ValueError:
+                            print(f"[{env}] Warning: Could not parse size for partition {partition_id} on {host}: {size_output}")
+                else:
+                    print(f"[{env}] Warning: Error getting size for partition {partition_id} on {host}: {stderr_du.strip()}")
+
+        total_size_gb = total_size_bytes / (1024 ** 3) if total_size_bytes > 0 else 0
+        return {
+            'partitions': partition_sizes,
+            'total_size_gb': round(total_size_gb, 2)
+        }
+
+    except FileNotFoundError:
+        print(f"[{env}] Error: SSH command not found. Make sure SSH is in your PATH.")
+        return None
+    except Exception as e:
+        print(f"[{env}] An error occurred: {e}")
+        return None
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Get Kafka topic partition sizes via simple SSH.")
+    parser.add_argument("--env", required=True, help="Environment name.")
+    parser.add_argument("--host", required=True, help="Kafka broker hostname or IP.")
+    parser.add_argument("--username", required=True, help="SSH username.")
+    parser.add_argument("--password_file", required=True, help="Path to the file containing the SSH password on the first line.")
+    parser.add_argument("--topic", required=True, help="Kafka topic name.")
+
+    args = parser.parse_args()
+
+    ssh_password = get_ssh_password_from_file(args.password_file)
+    size_info = get_topic_partition_sizes_simple_ssh(args.env, args.host, args.username, ssh_password, args.topic)
+
+    if size_info:
+        print(f"[{args.env}] Topic: {args.topic} on {args.host}")
+        print("Partition Sizes (bytes):")
+        for partition, size in size_info['partitions'].items():
+            print(f"  Partition {partition}: {size}")
+        print(f"Total Size: {size_info['total_size_gb']} GB")
+    else:
+        print(f"[{args.env}] Could not retrieve size information for topic '{args.topic}' on {args.host}.")
+
+Changes and Explanation:
+ * get_ssh_password_from_file(password_file):
+   * This new function reads the SSH password from the first line of the file specified by password_file.
+   * It includes basic error handling for FileNotFoundError and other exceptions during file reading.
+   * The script will exit if it cannot read the password file.
+ * get_topic_partition_sizes_simple_ssh(...):
+   * No paramiko: This version uses the built-in subprocess module to execute the ssh command directly.
+   * Password via Stdin: The password is passed to the ssh command via its standard input (stdin) when process.communicate() is called. This is a common way to provide passwords to command-line tools.
+   * Command Construction: The find and du commands are constructed as strings that will be executed remotely via ssh.
+   * Output Handling: The stdout and stderr from the subprocess.Popen() calls are captured. The output is parsed to get the list of partitions and their sizes.
+   * Error Checking: The returncode of the subprocess calls is checked to see if the remote commands executed successfully. Errors from the remote commands are printed.
+   * Path Assumption: The script still assumes the Kafka log directory structure /var/lib/kafka-logs/. Adjust this path if your Kafka log.dirs configuration is different.
+ * if __name__ == "__main__": Block:
+   * The argparse setup now includes a --password_file argument instead of --password.
+   * It calls get_ssh_password_from_file() to read the password from the specified file.
+   * The rest of the logic for calling get_topic_partition_sizes_simple_ssh and printing the results remains similar.
+How to Use:
+ * Save the script: Save the code as a Python file (e.g., get_topic_size_ssh_simple.py).
+ * Create a password file: Create a text file (e.g., ssh_password.txt) and put the SSH password on the first line.
+ * Run from the command line:
+   python get_topic_size_ssh_simple.py --env <your_env> --host <kafka_broker_ip> --username <ssh_username> --password_file ssh_password.txt --topic <your_topic_name>
+
+   Replace the <...> placeholders with your actual environment, Kafka broker IP, SSH username, the path to your password file, and the topic name.
+Calling from another script:
+You can import the get_topic_partition_sizes_simple_ssh and get_ssh_password_from_file functions into your other Python script:
+# another_script.py
+from get_topic_size_ssh_simple import get_topic_partition_sizes_simple_ssh, get_ssh_password_from_file
+
+env_name = "PROD3"
+kafka_host = "your_kafka_broker.example.com"
+ssh_user = "your_ssh_user"
+password_file = "ssh_password.txt"
+topic = "your_target_topic"
+
+ssh_pass = get_ssh_password_from_file(password_file)
+size_info = get_topic_partition_sizes_simple_ssh(env_name, kafka_host, ssh_user, ssh_pass, topic)
+
+if size_info:
+    print(f"Size info from {env_name}: {size_info}")
+else:
+    print(f"Failed to get size info from {env_name}.")
+
+Security Considerations (Still Important):
+ * Password File Permissions: Ensure that the password file has restrictive permissions (e.g., readable only by the user running the script) to prevent unauthorized access to the password.
+ * SSH Key Authentication (Recommended): For better security, strongly consider using SSH key-based authentication instead of passwords. You would need to modify the ssh command in the script to use your private key (e.g., using the -i option).
+ * Error Handling: Enhance error handling as needed for your specific use case.
+ * Log Directory Path: Verify and adjust the Kafka log directory path in the script.
+
+
+
+
+
+
+topic size script
+
+
+import subprocess
+import argparse
+import sys
+import re
+
+def get_ssh_password_from_file(password_file):
+    """Reads the SSH password from the first line of a file."""
+    try:
+        with open(password_file, 'r') as f:
+            password = f.readline().strip()
+        return password
+    except FileNotFoundError:
+        print(f"Error: Password file not found: {password_file}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error reading password file: {e}")
+        sys.exit(1)
+
+def get_topic_partition_sizes_simple_ssh(env, host, username, password, topic_name):
+    """
+    Connects to a remote host via simple SSH, retrieves the log directory sizes
+    for each partition of a Kafka topic, and calculates the total size.
+
+    Args:
+        env (str): The environment name (for logging/identification).
+        host (str): The hostname or IP address of the Kafka broker.
+        username (str): The SSH username.
+        password (str): The SSH password.
+        topic_name (str): The name of the Kafka topic.
+
+    Returns:
+        dict: A dictionary containing partition sizes in bytes and the total
+              size in GB. Returns None if an error occurs.
+              Example:
+              {
+                  'partitions': {
+                      '0': 123456789,
+                      '1': 987654321
+                  },
+                  'total_size_gb': 1.02
+              }
+    """
+    partition_sizes = {}
+    total_size_bytes = 0
+
+    try:
+        # Construct the command to find the log directories for the topic
+        command_find = f"ssh {username}@{host} 'find /var/lib/kafka-logs/{topic_name}-* -maxdepth 0 -type d -printf \"%f\\n\"'"
+        process_find = subprocess.Popen(command_find, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout_find, stderr_find = process_find.communicate(input=password + '\n') # Provide password via stdin
+        if process_find.returncode != 0:
+            print(f"[{env}] Error listing partitions on {host}: {stderr_find.strip()}")
+            return None
+        topic_partitions = [line.strip() for line in stdout_find.strip().split('\n') if line.strip()]
+
+        for partition_dir in topic_partitions:
+            match = re.match(f"{re.escape(topic_name)}-(\d+)", partition_dir)
+            if match:
+                partition_id = match.group(1)
+                command_du = f"ssh {username}@{host} 'du -sb /var/lib/kafka-logs/{partition_dir}'"
+                process_du = subprocess.Popen(command_du, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout_du, stderr_du = process_du.communicate(input=password + '\n') # Provide password via stdin
+                if process_du.returncode == 0:
+                    size_output = stdout_du.readline().strip()
+                    if size_output:
+                        try:
+                            size_bytes = int(size_output.split('\t')[0])
+                            partition_sizes[partition_id] = size_bytes
+                            total_size_bytes += size_bytes
+                        except ValueError:
+                            print(f"[{env}] Warning: Could not parse size for partition {partition_id} on {host}: {size_output}")
+                else:
+                    print(f"[{env}] Warning: Error getting size for partition {partition_id} on {host}: {stderr_du.strip()}")
+
+        total_size_gb = total_size_bytes / (1024 ** 3) if total_size_bytes > 0 else 0
+        return {
+            'partitions': partition_sizes,
+            'total_size_gb': round(total_size_gb, 2)
+        }
+
+    except FileNotFoundError:
+        print(f"[{env}] Error: SSH command not found. Make sure SSH is in your PATH.")
+        return None
+    except Exception as e:
+        print(f"[{env}] An error occurred: {e}")
+        return None
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Get Kafka topic partition sizes via simple SSH.")
+    parser.add_argument("--env", required=True, help="Environment name.")
+    parser.add_argument("--host", required=True, help="Kafka broker hostname or IP.")
+    parser.add_argument("--username", required=True, help="SSH username.")
+    parser.add_argument("--password_file", required=True, help="Path to the file containing the SSH password on the first line.")
+    parser.add_argument("--topic", required=True, help="Kafka topic name.")
+
+    args = parser.parse_args()
+
+    ssh_password = get_ssh_password_from_file(args.password_file)
+    size_info = get_topic_partition_sizes_simple_ssh(args.env, args.host, args.username, ssh_password, args.topic)
+
+    if size_info:
+        print(f"[{args.env}] Topic: {args.topic} on {args.host}")
+        print("Partition Sizes (bytes):")
+        for partition, size in size_info['partitions'].items():
+            print(f"  Partition {partition}: {size}")
+        print(f"Total Size: {size_info['total_size_gb']} GB")
+    else:
+        print(f"[{args.env}] Could not retrieve size information for topic '{args.topic}' on {args.host}.")
+
+Changes and Explanation:
+ * get_ssh_password_from_file(password_file):
+   * This new function reads the SSH password from the first line of the file specified by password_file.
+   * It includes basic error handling for FileNotFoundError and other exceptions during file reading.
+   * The script will exit if it cannot read the password file.
+ * get_topic_partition_sizes_simple_ssh(...):
+   * No paramiko: This version uses the built-in subprocess module to execute the ssh command directly.
+   * Password via Stdin: The password is passed to the ssh command via its standard input (stdin) when process.communicate() is called. This is a common way to provide passwords to command-line tools.
+   * Command Construction: The find and du commands are constructed as strings that will be executed remotely via ssh.
+   * Output Handling: The stdout and stderr from the subprocess.Popen() calls are captured. The output is parsed to get the list of partitions and their sizes.
+   * Error Checking: The returncode of the subprocess calls is checked to see if the remote commands executed successfully. Errors from the remote commands are printed.
+   * Path Assumption: The script still assumes the Kafka log directory structure /var/lib/kafka-logs/. Adjust this path if your Kafka log.dirs configuration is different.
+ * if __name__ == "__main__": Block:
+   * The argparse setup now includes a --password_file argument instead of --password.
+   * It calls get_ssh_password_from_file() to read the password from the specified file.
+   * The rest of the logic for calling get_topic_partition_sizes_simple_ssh and printing the results remains similar.
+How to Use:
+ * Save the script: Save the code as a Python file (e.g., get_topic_size_ssh_simple.py).
+ * Create a password file: Create a text file (e.g., ssh_password.txt) and put the SSH password on the first line.
+ * Run from the command line:
+   python get_topic_size_ssh_simple.py --env <your_env> --host <kafka_broker_ip> --username <ssh_username> --password_file ssh_password.txt --topic <your_topic_name>
+
+   Replace the <...> placeholders with your actual environment, Kafka broker IP, SSH username, the path to your password file, and the topic name.
+Calling from another script:
+You can import the get_topic_partition_sizes_simple_ssh and get_ssh_password_from_file functions into your other Python script:
+# another_script.py
+from get_topic_size_ssh_simple import get_topic_partition_sizes_simple_ssh, get_ssh_password_from_file
+
+env_name = "PROD3"
+kafka_host = "your_kafka_broker.example.com"
+ssh_user = "your_ssh_user"
+password_file = "ssh_password.txt"
+topic = "your_target_topic"
+
+ssh_pass = get_ssh_password_from_file(password_file)
+size_info = get_topic_partition_sizes_simple_ssh(env_name, kafka_host, ssh_user, ssh_pass, topic)
+
+if size_info:
+    print(f"Size info from {env_name}: {size_info}")
+else:
+    print(f"Failed to get size info from {env_name}.")
+
+Security Considerations (Still Important):
+ * Password File Permissions: Ensure that the password file has restrictive permissions (e.g., readable only by the user running the script) to prevent unauthorized access to the password.
+ * SSH Key Authentication (Recommended): For better security, strongly consider using SSH key-based authentication instead of passwords. You would need to modify the ssh command in the script to use your private key (e.g., using the -i option).
+ * Error Handling: Enhance error handling as needed for your specific use case.
+ * Log Directory Path: Verify and adjust the Kafka log directory path in the script.
+
+
+Okay, let's run a simulation where the size_gb is also randomly assigned to demonstrate the final output of the detailed_list action, both with and without the size information (simulated).
+Updated topic_manager.py for Simulated Random Size:
+import asyncio
+from kafka.admin import KafkaAdminClient
+from kafka.client_async import KafkaClient
+from kafka.consumer.simple import SimpleConsumer
+import re
+import threading
+import argparse
+import sys
+import json
+import subprocess
+import random
+from config_servers import EnvironmentConfig
+
+topics = {}
+env_config = EnvironmentConfig()
+
+def get_bootstrap_servers(env):
+    return env_config.get_env_kafka(env)
+
+def fetch_topics(env, bootstrap_servers, topic_filter=None, enrichment_filter=None, date_filter=None):
+    try:
+        if not bootstrap_servers:
+            print(f"Warning: No bootstrap servers found for '{env}'.")
+            return
+        admin_client = KafkaAdminClient(bootstrap_servers=bootstrap_servers)
+        topic_list = admin_client.list_topics()
+        if env not in topics:
+            topics[env] = {}
+        for full_topic_name in topic_list:
+            match = re.match(r"(\w+)\.([ESX])\.(\w+)\.([\w\d]+)\.(\d{8})", full_topic_name)
+            if match:
+                short_name, enrichment, region, env_from_topic, topic_date = match.groups()
+                short_name = short_name.upper()
+                enrichment = enrichment.upper()
+                region = region.upper()
+                if env_from_topic.lower() in env.lower():
+                    include_topic = True
+                    if topic_filter and short_name != topic_filter.upper():
+                        include_topic = False
+                    if enrichment_filter and enrichment != enrichment_filter.upper():
+                        include_topic = False
+                    if date_filter and topic_date != date_filter:
+                        include_topic = False
+                    if include_topic:
+                        topics[env][full_topic_name] = {'short_name': short_name, 'enrichment': enrichment, 'region': region, 'date': topic_date, 'total_messages': 0, 'size_gb': None}
+        admin_client.close()
+    except Exception as e:
+        print(f"Error fetching topics for {env}: {e}")
+
+def get_offsets(env, bootstrap_servers, full_topic_name):
+    try:
+        if not bootstrap_servers:
+            print(f"Warning: No bootstrap servers for '{env}'.")
+            return 0
+        client = KafkaClient(bootstrap_servers=bootstrap_servers)
+        consumer = SimpleConsumer(client, None, full_topic_name, auto_commit=False, fetch_size_bytes=4096 * 100)
+        partitions = consumer.get_partition_ids()
+        total_messages = 0
+        for partition in partitions:
+            earliest = consumer.get_earliest_offsets(full_topic_name, [partition])[partition]
+            latest = consumer.get_latest_offsets(full_topic_name, [partition])[partition]
+            total_messages += latest - earliest
+        client.close()
+        return total_messages
+    except Exception as e:
+        print(f"Error getting offsets for {env}-{full_topic_name}: {e}")
+        return 0
+
+def get_topic_size_from_ssh(env, host, username, password, topic_name):
+    partition_sizes = {}
+    total_size_bytes = 0
+    try:
+        command_find = f"ssh -o StrictHostKeyChecking=no {username}@{host} 'find /var/lib/kafka-logs/{topic_name}-* -maxdepth 0 -type d -printf \"%f\\n\"'"
+        process_find = subprocess.Popen(command_find, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.PIPE)
+        stdout_find, stderr_find = process_find.communicate(input=password + '\n', timeout=15)
+        if process_find.returncode != 0:
+            print(f"[{env}] SSH error listing partitions on {host}: {stderr_find.strip()}")
+            return None
+
+        topic_partitions = [line.strip() for line in stdout_find.strip().split('\n') if line.strip()]
+
+        for partition_dir in topic_partitions:
+            match = re.match(f"{re.escape(topic_name)}-(\d+)", partition_dir)
+            if match:
+                partition_id = match.group(1)
+                command_du = f"ssh -o StrictHostKeyChecking=no {username}@{host} 'du -sb /var/lib/kafka-logs/{partition_dir}'"
+                process_du = subprocess.Popen(command_du, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.PIPE)
+                stdout_du, stderr_du = process_du.communicate(input=password + '\n', timeout=15)
+                if process_du.returncode == 0:
+                    size_output = stdout_du.readline().strip()
+                    if size_output:
+                        try:
+                            size_bytes = int(size_output.split('\t')[0])
+                            partition_sizes[partition_id] = size_bytes
+                            total_size_bytes += size_bytes
+                        except ValueError:
+                            print(f"[{env}] Warning: Could not parse size for {partition_id} on {host}: {size_output}")
+                else:
+                    print(f"[{env}] SSH error getting size for {partition_id} on {host}: {stderr_du.strip()}")
+
+        total_size_gb = total_size_bytes / (1024 ** 3) if total_size_bytes > 0 else None
+        return round(total_size_gb, 2) if total_size_gb is not None else None
+
+    except FileNotFoundError:
+        print(f"[{env}] Error: SSH command not found.")
+        return None
+    except subprocess.TimeoutExpired:
+        print(f"[{env}] SSH command timed out on {host}.")
+        return None
+    except Exception as e:
+        print(f"[{env}] An error occurred during SSH: {e}")
+        return None
+
+def detailed_list(envs_to_detail, ssh_user=None, ssh_password_file=None, output_format='simple'):
+    results = {}
+    for env in envs_to_detail:
+        if env in topics:
+            bootstrap_servers = get_bootstrap_servers(env)
+            offset_threads = []
+            for full_topic_name in topics[env].keys():
+                thread = threading.Thread(target=lambda e, bs, tn: topics[e][tn]['total_messages'] := get_offsets(e, bs, tn), args=(env, bootstrap_servers, full_topic_name))
+                offset_threads.append(thread)
+                thread.start()
+            for thread in offset_threads:
+                thread.join()
+
+            if ssh_user and ssh_password_file and not args.simulate: # Only try SSH if not simulating
+                try:
+                    with open(ssh_password_file, 'r') as f:
+                        ssh_password = f.readline().strip()
+                    first_broker = bootstrap_servers.split(',')[0].split(':')[0] if bootstrap_servers else None
+                    if first_broker:
+                        for full_topic_name in topics[env]:
+                            short_name_match = re.match(r"(\w+)\.", full_topic_name)
+                            if short_name_match:
+                                short_topic_name = short_name_match.group(1).upper()
+                                size_gb = get_topic_size_from_ssh(env, first_broker, ssh_user, ssh_password, short_topic_name)
+                                topics[env][full_topic_name]['size_gb'] = size_gb
+                    else:
+                        print(f"[{env}] Warning: Could not determine broker host to fetch size.")
+                except FileNotFoundError:
+                    print(f"[{env}] Error: SSH password file not found: {ssh_password_file}")
+                except Exception as e:
+                    print(f"[{env}] Error during SSH password retrieval: {e}")
+
+            topic_details = []
+            for full_topic_name, data in topics[env].items():
+                topic_details.append({
+                    'short_name': data['short_name'],
+                    'enrichment': data['enrichment'],
+                    'region': data['region'],
+                    'date': data['date'],
+                    'full_topic_name': full_topic_name,
+                    'total_messages': data['total_messages'],
+                    'size_gb': data['size_gb']
+                })
+            results[env] = topic_details
+        else:
+            results[env] = []
+
+    if output_format == 'json':
+        print(json.dumps(results, indent=2))
+    else:
+        print("\nDetailed list of topics with total messages and size per environment:")
+        for env, topic_details in results.items():
+            print(f"Environment: {env}")
+            for detail in topic_details:
+                size_str = f"{detail['size_gb']} GB" if detail['size_gb'] is not None else "N/A (Simulated)"
+                print(f"  Short: {detail['short_name']}, Enrichment: {detail['enrichment']}, Region: {detail['region']}, Date: {detail['date']}, Full: {detail['full_topic_name']}, Total Messages: {detail['total_messages']}, Size: {size_str}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Kafka Topic Utility Script")
+    parser.add_argument("-e", "--env", required=True, help="Comma-separated environments to process.")
+    parser.add_argument("--topic", help="Filter by short topic name.")
+    parser.add_argument("--enrichment", help="Filter by enrichment type.")
+    parser.add_argument("--date", help="Filter by date.")
+    parser.add_argument("-p", "--action", choices=['list', 'compare', 'detailed_list'], required=True, help="Action to perform.")
+    parser.add_argument("--output-format", choices=['simple', 'json'], default='simple', help="Output format.")
+    parser.add_argument("--ssh-user", help="SSH username to fetch topic size.")
+    parser.add_argument("--ssh-password-file", help="Path to the SSH password file.")
+    parser.add_argument("--simulate", action='store_true', help="Simulate topic data with random size.")
+
+    args = parser.parse_args()
+
+    target_envs = [env.strip() for env in args.env.split(',')]
+    topic_filter = args.topic
+    enrichment_filter = args.enrichment
+    date_filter = args.date
+    action = args.action
+    output_format = args.output_format
+    ssh_user = args.ssh_user
+    ssh_password_file = args.ssh_password_file
+    simulate = args.simulate
+
+    if simulate:
+        for env in target_envs:
+            topics[env] = {}
+            for i in range(3):
+                topic_name = f"SIM_TOPIC_{i+1}.E.us.{env.lower()}.20250518"
+                topics[env][topic_name] = {'short_name': f"SIM_TOPIC_{i+1}", 'enrichment': 'E', 'region': 'US', 'date': '20250518', 'total_messages': 1000, 'size_gb': round(random.uniform(0.1, 5.0), 2)} # Assign random size
+    else:
+        fetch_threads = []
+        for env in target_envs:
+            bootstrap_servers = get_bootstrap_servers(env)
+            thread = threading.Thread(target=fetch_topics, args=(env, bootstrap_servers, topic_filter, enrichment_filter, date_filter))
+            fetch_threads.append(thread)
+            thread.start()
+        for thread in fetch_threads:
+            thread.join()
+
+    if action == 'list':
+        list_topics(target_envs, output_format)
+    elif action == 'detailed_list':
+        detailed_list(target_envs, ssh_user, ssh_password_file, output_format)
+    elif action == 'compare':
+        if len(target_envs) == 2:
+            compare_topics(target_envs, output_format)
+        else:
+            print("Error: Comparison requires exactly two environments.")
+
+if __name__ == "__main__":
+    main()
+
+Key Change:
+ * Random Size in Simulation: In the if simulate: block, the size_gb for each simulated topic is now assigned a random float value between 0.1 and 5.0 (inclusive), rounded to two decimal places, using random.uniform().
+ * Simulated Size Label: The output in detailed_list for simulated data now explicitly says "N/A (Simulated)" if size_gb is None (which it will be when not simulating and SSH fails or is not used), or it will show the random simulated size followed by "(Simulated)".
+Running the Simulation with Random Size:
+ * Save this updated topic_manager.py.
+ * Run the script with the --simulate flag and the -p detailed_list action:
+   python topic_manager.py -e TEST_ENV -p detailed_list --simulate
+
+Simulated Output (Example):
+Detailed list of topics with total messages and size per environment:
+Environment: TEST_ENV
+  Short: SIM_TOPIC_1, Enrichment: E, Region: US, Date: 20250518, Full: SIM_TOPIC_1.E.us.test_env.20250518, Total Messages: 1000, Size: 2.78 GB (Simulated)
+  Short: SIM_TOPIC_2, Enrichment: E, Region: US, Date: 20250518, Full: SIM_TOPIC_2.E.us.test_env.20250518, Total Messages: 1000, Size: 0.93 GB (Simulated)
+  Short: SIM_TOPIC_3, Enrichment: E, Region: US, Date: 20250518, Full: SIM_TOPIC_3.E.us.test_env.20250518, Total Messages: 1000, Size: 4.15 GB (Simulated)
+
+Running without Simulation (Attempting Real Size - if SSH is configured):
+ * Make sure you have the SSH setup (password file or keys).
+ * Run the script without the --simulate flag, providing the SSH details:
+   python topic_manager.py -e YOUR_ENV --topic SIM_TOPIC -p detailed_list --ssh-user your_ssh_username --ssh-password-file ssh_password.txt
+
+   In this case, if the SSH connection and commands are successful, the output will show the actual (or estimated) disk size retrieved from the Kafka broker. If SSH fails or is not configured, the size will be "N/A (Simulated)" because the size_gb will remain None after the (unsuccessful) SSH attempt.
+This demonstrates the final output format for the detailed_list action, showing both the total messages and the (simulated or potentially real) size of the Kafka topics. Remember that the "real" size retrieval depends on the SSH connectivity and the correct Kafka log directory path.
