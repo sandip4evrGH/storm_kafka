@@ -1,0 +1,217 @@
+import argparse
+import json
+import logging
+import random
+import string
+import sys
+import time
+
+from kafka import KafkaAdminClient, KafkaProducer
+from kafka.admin import NewTopic
+from kafka.errors import KafkaError
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+class KafkaTopicUtil:
+    """
+    A utility class for managing Kafka topics and sending random messages.
+    """
+    def __init__(self, bootstrap_servers):
+        """
+        Initializes the KafkaTopicUtil with the Kafka bootstrap servers.
+
+        Args:
+            bootstrap_servers (str): Comma-separated list of Kafka broker addresses (e.g., "localhost:9092").
+        """
+        self.bootstrap_servers = bootstrap_servers
+        self.admin_client = None
+        self.producer = None
+        self._connect_admin()
+        self._connect_producer()
+
+    def _connect_admin(self):
+        """Connects to the Kafka admin client."""
+        try:
+            self.admin_client = KafkaAdminClient(bootstrap_servers=self.bootstrap_servers)
+            logging.info(f"Successfully connected to Kafka admin at: {self.bootstrap_servers}")
+        except KafkaError as e:
+            logging.error(f"Error connecting to Kafka admin: {e}")
+            sys.exit(1)
+
+    def _connect_producer(self):
+        """Connects to the Kafka producer."""
+        try:
+            self.producer = KafkaProducer(bootstrap_servers=self.bootstrap_servers,
+                                          value_serializer=lambda x: json.dumps(x).encode('utf-8'))
+            logging.info(f"Successfully connected to Kafka producer at: {self.bootstrap_servers}")
+        except KafkaError as e:
+            logging.error(f"Error connecting to Kafka producer: {e}")
+            sys.exit(1)
+
+    def create_topic(self, topic_name, num_partitions=1, replication_factor=1):
+        """
+        Creates a new Kafka topic.
+
+        Args:
+            topic_name (str): The name of the topic to create.
+            num_partitions (int): The number of partitions for the topic. Defaults to 1.
+            replication_factor (int): The replication factor for the topic. Defaults to 1.
+        """
+        try:
+            if topic_name not in self.admin_client.list_topics():
+                new_topic = NewTopic(name=topic_name, num_partitions=num_partitions, replication_factor=replication_factor)
+                self.admin_client.create_topics(new_topics=[new_topic], timeout_ms=10000)
+                logging.info(f"Topic '{topic_name}' created successfully.")
+            else:
+                logging.info(f"Topic '{topic_name}' already exists.")
+        except KafkaError as e:
+            logging.error(f"Error creating topic '{topic_name}': {e}")
+
+    def delete_topic(self, topic_name):
+        """
+        Deletes a Kafka topic.
+
+        Args:
+            topic_name (str): The name of the topic to delete.
+        """
+        try:
+            if topic_name in self.admin_client.list_topics():
+                self.admin_client.delete_topics(topics=[topic_name], timeout_ms=10000)
+                logging.info(f"Topic '{topic_name}' deleted successfully.")
+            else:
+                logging.info(f"Topic '{topic_name}' does not exist.")
+        except KafkaError as e:
+            logging.error(f"Error deleting topic '{topic_name}': {e}")
+
+    def send_random_messages(self, topic_name, num_messages, event_size_kb=100):
+        """
+        Sends a specified number of random messages to a Kafka topic.
+
+        Args:
+            topic_name (str): The name of the topic to send messages to.
+            num_messages (int): The number of messages to send.
+            event_size_kb (int): The approximate size of each event in kilobytes. Defaults to 100 KB.
+        """
+        if self.producer is None:
+            logging.error("Kafka producer is not initialized.")
+            return
+
+        try:
+            event_size_bytes = event_size_kb * 1024
+            random_payload = ''.join(random.choices(string.ascii_letters + string.digits, k=event_size_bytes))
+
+            logging.info(f"Sending {num_messages} random messages of approximately {event_size_kb} KB each to topic '{topic_name}'.")
+            for i in range(num_messages):
+                message = {"event_id": i + 1, "timestamp": time.time(), "data": random_payload[:event_size_bytes]}
+                self.producer.send(topic_name, value=message)
+                if (i + 1) % 100 == 0:
+                    logging.info(f"Sent {i + 1}/{num_messages} messages to '{topic_name}'.")
+            self.producer.flush()
+            logging.info(f"Successfully sent {num_messages} messages to topic '{topic_name}'.")
+        except KafkaError as e:
+            logging.error(f"Error sending messages to topic '{topic_name}': {e}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while sending messages: {e}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Kafka Topic Management Utility")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Create topic subcommand
+    create_parser = subparsers.add_parser("create", help="Create a new Kafka topic")
+    create_parser.add_argument("-t", "--topic", required=True, help="Name of the topic to create")
+    create_parser.add_argument("--partitions", type=int, default=1, help="Number of partitions for the topic (default: 1)")
+    create_parser.add_argument("--replication", type=int, default=1, help="Replication factor for the topic (default: 1)")
+
+    # Delete topic subcommand
+    delete_parser = subparsers.add_parser("delete", help="Delete an existing Kafka topic")
+    delete_parser.add_argument("-t", "--topic", required=True, help="Name of the topic to delete")
+
+    # Send messages subcommand
+    send_parser = subparsers.add_parser("send", help="Send random messages to a Kafka topic")
+    send_parser.add_argument("-t", "--topic", required=True, help="Name of the topic to send messages to")
+    send_parser.add_argument("-messages", type=int, required=True, help="Number of messages to send")
+    send_parser.add_argument("-size", type=int, default=100, help="Approximate size of each event in KB (default: 100)")
+
+    parser.add_argument("--bootstrap-servers", default="localhost:9092", help="Kafka bootstrap servers (default: localhost:9092)")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    kafka_util = KafkaTopicUtil(args.bootstrap_servers)
+
+    if args.command == "create":
+        kafka_util.create_topic(args.topic, args.partitions, args.replication)
+    elif args.command == "delete":
+        kafka_util.delete_topic(args.topic)
+    elif args.command == "send":
+        kafka_util.send_random_messages(args.topic, args.messages, args.size)
+    else:
+        logging.error(f"Unknown command: {args.command}")
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
+
+How to Use:
+ * Save the script: Save the code above as kafka_topic_util.py.
+ * Ensure Kafka is running: Make sure your Kafka broker(s) are running and accessible.
+ * Run from the command line: Open your terminal or command prompt and navigate to the directory where you saved the script.
+Available Commands:
+ * Create Topic:
+   python kafka_topic_util.py create -t my-new-topic --partitions 3 --replication 2 --bootstrap-servers kafka-broker1:9092,kafka-broker2:9092
+
+   * -t or --topic: Specifies the name of the topic to create (my-new-topic in this example).
+   * --partitions: (Optional) Sets the number of partitions for the topic (default is 1).
+   * --replication: (Optional) Sets the replication factor for the topic (default is 1).
+   * --bootstrap-servers: (Optional) Specifies the Kafka broker addresses (default is localhost:9092).
+ * Delete Topic:
+   python kafka_topic_util.py delete -t my-new-topic --bootstrap-servers localhost:9092
+
+   * -t or --topic: Specifies the name of the topic to delete (my-new-topic in this example).
+   * --bootstrap-servers: (Optional) Specifies the Kafka broker addresses (default is localhost:9092).
+ * Send Messages:
+   python kafka_topic_util.py send -t my-topic -messages 1000 -size 200 --bootstrap-servers localhost:9092
+
+   * -t or --topic: Specifies the name of the topic to send messages to (my-topic in this example).
+   * -messages: Specifies the number of random messages to send (1000 in this example).
+   * -size: (Optional) Specifies the approximate size of each event in kilobytes (200 KB in this example, default is 100 KB).
+   * --bootstrap-servers: (Optional) Specifies the Kafka broker addresses (default is localhost:9092).
+Explanation:
+ * Import Libraries:
+   * argparse: For parsing command-line arguments.
+   * json: For serializing messages to JSON before sending.
+   * logging: For providing informative output and error handling.
+   * random: For generating random data for messages.
+   * string: To get a set of characters for random data generation.
+   * sys: For exiting the script in case of errors.
+   * time: To include a timestamp in the messages.
+   * kafka: The main Kafka Python client library.
+   * kafka.admin: For administrative tasks like creating and deleting topics.
+   * kafka.admin.NewTopic: A class to define new topics.
+   * kafka.errors.KafkaError: A base class for Kafka-related exceptions.
+ * KafkaTopicUtil Class:
+   * __init__(self, bootstrap_servers): Initializes the utility with the Kafka broker addresses and creates Kafka admin and producer clients.
+   * _connect_admin(self): Establishes a connection to the Kafka admin client.
+   * _connect_producer(self): Establishes a connection to the Kafka producer.
+   * create_topic(self, topic_name, num_partitions=1, replication_factor=1): Creates a new Kafka topic with the specified name, number of partitions, and replication factor. It checks if the topic already exists before attempting to create it.
+   * delete_topic(self, topic_name): Deletes an existing Kafka topic. It checks if the topic exists before attempting to delete it.
+   * send_random_messages(self, topic_name, num_messages, event_size_kb=100): Sends a specified number of random JSON messages to a given Kafka topic. The size of each message's data field is approximately the user-defined event_size_kb.
+ * main() Function:
+   * Creates an ArgumentParser to handle command-line arguments.
+   * Defines subparsers for the create, delete, and send commands, each with its own set of arguments.
+   * Adds a global --bootstrap-servers argument.
+   * Parses the command-line arguments using parser.parse_args().
+   * Checks if a command was provided; if not, it prints the help message and exits.
+   * Creates an instance of the KafkaTopicUtil class.
+   * Based on the provided command, it calls the corresponding method of the KafkaTopicUtil to create, delete, or send messages to the specified Kafka topic.
+   * Handles the case of an unknown command.
+Before Running:
+ * Install the Kafka Python library:
+   pip install kafka-python
+
+ * Ensure Kafka is accessible: Make sure your Kafka broker(s) are running and that the address(es) provided with --bootstrap-servers are correct and reachable from where you run the script.
