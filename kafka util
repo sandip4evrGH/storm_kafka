@@ -1,272 +1,854 @@
-Okay, here are the contents for the three files (topic_manager.py, bootstrap_servers.txt, and test_topic_manager.py) as plain text so you can easily copy them.
-File: topic_manager.py
+
+Okay, here are the contents of all the files (config_servers.py, topic_manager.py, test_topic_manager.py) in Python format, followed by the stimulated outputs for various scenarios in plain text format. You can copy and paste these directly into Google Docs or a giant text file.
+
+File 1: config_servers.py (Python)
+
+class EnvironmentConfig:
+
+    def __init__(self):
+
+        self.environments = {
+
+            'PROD3': {
+
+                'kafka': ['losthost:9092', 'localhost2:9092'],
+
+                'storm_ui': 'localhost:8090',
+
+                'cassandra': 7000
+
+            },
+
+            'PROD4': {
+
+                'kafka': ['prod4-kafka1:9092', 'prod4-kafka2:9092'],
+
+                'storm_ui': 'prod4-ui:8090',
+
+                'cassandra': 7001
+
+            },
+
+            'DEV1': {
+
+                'kafka': ['dev1-kafka:9092'],
+
+                'storm_ui': 'dev1-ui:8080',
+
+                'cassandra': 7002
+
+            }
+
+            # Add more environments as needed
+
+        }
+
+
+
+    def get_env_kafka(self, env):
+
+        env_config = self.environments.get(env.upper())
+
+        if env_config:
+
+            return ",".join(env_config.get('kafka', []))
+
+        return None
+
+
+
+    def get_env_storm_ui(self, env):
+
+        env_config = self.environments.get(env.upper())
+
+        if env_config:
+
+            return env_config.get('storm_ui')
+
+        return None
+
+
+
+    def get_env_cassandra(self, env):
+
+        env_config = self.environments.get(env.upper())
+
+        if env_config:
+
+            return env_config.get('cassandra')
+
+        return None
+
+
+
+# Example usage (can be removed or kept for testing the config script)
+
+if __name__ == "__main__":
+
+    config = EnvironmentConfig()
+
+    prod3_kafka = config.get_env_kafka('prod3')
+
+    print(f"PROD3 Kafka Servers: {prod3_kafka}")
+
+    prod3_storm = config.get_env_storm_ui('prod3')
+
+    print(f"PROD3 Storm UI: {prod3_storm}")
+
+    dev1_cassandra = config.get_env_cassandra('dev1')
+
+    print(f"DEV1 Cassandra Port: {dev1_cassandra}")
+
+    nonexistent_kafka = config.get_env_kafka('UAT')
+
+    print(f"UAT Kafka Servers: {nonexistent_kafka}")
+
+
+
+File 2: topic_manager.py (Python)
+
 import asyncio
+
 from kafka.admin import KafkaAdminClient
+
 from kafka.client_async import KafkaClient
+
 from kafka.consumer.simple import SimpleConsumer
+
 import re
+
 import threading
+
 import argparse
+
 import sys
 
-topics = []
+import json
 
-def get_bootstrap_servers_from_file(file_path, env):
-    """
-    Reads the bootstrap servers for a given environment from a file.
-    Assumes each line in the file has the format: ENV=broker1:port1,broker2:port2,...
-    """
-    try:
-        with open(file_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith(f"{env}="):
-                    return line.split("=", 1)[1]
-    except FileNotFoundError:
-        print(f"Error: Bootstrap servers file '{file_path}' not found.")
-        sys.exit(1)
-    return None
+from config_servers import EnvironmentConfig
 
-def fetch_topics(env, bootstrap_servers, date_filter=None, type_filter=None, topic_filter_list=None):
+
+
+topics = {} # Structure: {'env': {'full_topic_name': {'short_name': str, 'enrichment': str, 'region': str, 'date': str, 'total_messages': int}}}
+
+env_config = EnvironmentConfig()
+
+
+
+def get_bootstrap_servers(env):
+
+    """Gets bootstrap servers from the config script."""
+
+    return env_config.get_env_kafka(env)
+
+
+
+def fetch_topics(env, bootstrap_servers, topic_filter=None, enrichment_filter=None, date_filter=None):
+
     try:
+
         if not bootstrap_servers:
-            print(f"Warning: No bootstrap servers found for environment '{env}'. Skipping.")
+
+            print(f"Warning: No bootstrap servers found for environment '{env}'. Skipping topic fetching.")
+
             return
+
+
 
         admin_client = KafkaAdminClient(bootstrap_servers=bootstrap_servers)
-        topic_list = admin_client.list_topics()
-        for topic_name in topic_list:
-            match = re.match(r"(\w+)\.(\w+)\.(\w+)\.([\w\d]+)\.(\d{8})", topic_name)
-            if match:
-                prefix, middle1, middle2, env_from_topic, topic_date = match.groups()
-                if env_from_topic.lower() in env.lower(): # Basic check if topic env matches provided env
-                    if date_filter and topic_date != date_filter:
-                        continue
-                    if type_filter and middle1.upper() != type_filter.upper():
-                        continue
-                    if topic_filter_list and not any(filter_topic.upper() in topic_name.upper() for filter_topic in topic_filter_list):
-                        continue
 
-                    topic_details = {
-                        "prefix": prefix,
-                        "middle1": middle1,
-                        "middle2": middle2,
-                        "env_from_topic": env_from_topic,
-                        "date": topic_date,
-                        "total_messages": 0
-                    }
-                    topics.append({"env": env, "topic_name": topic_name, "details": topic_details})
+        topic_list = admin_client.list_topics()
+
+        if env not in topics:
+
+            topics[env] = {}
+
+        for full_topic_name in topic_list:
+
+            match = re.match(r"(\w+)\.([ESX])\.(\w+)\.([\w\d]+)\.(\d{8})", full_topic_name)
+
+            if match:
+
+                short_name, enrichment, region, env_from_topic, topic_date = match.groups()
+
+                short_name = short_name.upper()
+
+                enrichment = enrichment.upper()
+
+                region = region.upper()
+
+
+
+                if env_from_topic.lower() in env.lower():
+
+                    include_topic = True
+
+                    if topic_filter and short_name != topic_filter.upper():
+
+                        include_topic = False
+
+                    if enrichment_filter and enrichment != enrichment_filter.upper():
+
+                        include_topic = False
+
+                    if date_filter and topic_date != date_filter:
+
+                        include_topic = False
+
+
+
+                    if include_topic:
+
+                        topics[env][full_topic_name] = {'short_name': short_name, 'enrichment': enrichment, 'region': region, 'date': topic_date, 'total_messages': 0}
+
         admin_client.close()
+
     except Exception as e:
+
         print(f"Error fetching topics for {env}: {e}")
 
-def get_offsets(env, bootstrap_servers, topic_name, topic_details):
+
+
+def get_offsets(env, bootstrap_servers, full_topic_name):
+
     try:
+
         if not bootstrap_servers:
-            print(f"Warning: No bootstrap servers found for environment '{env}'. Skipping offset retrieval for {topic_name}.")
-            return
+
+            print(f"Warning: No bootstrap servers found for environment '{env}'. Skipping offset retrieval for {full_topic_name}.")
+
+            return 0
+
+
 
         client = KafkaClient(bootstrap_servers=bootstrap_servers)
-        consumer = SimpleConsumer(client, None, topic_name, auto_commit=False, fetch_size_bytes=4096 * 100)
+
+        consumer = SimpleConsumer(client, None, full_topic_name, auto_commit=False, fetch_size_bytes=4096 * 100)
+
         partitions = consumer.get_partition_ids()
+
         total_messages = 0
+
         for partition in partitions:
-            earliest_offset = consumer.get_earliest_offsets(topic_name, [partition])[partition]
-            latest_offset = consumer.get_latest_offsets(topic_name, [partition])[partition]
+
+            earliest_offset = consumer.get_earliest_offsets(full_topic_name, [partition])[partition]
+
+            latest_offset = consumer.get_latest_offsets(full_topic_name, [partition])[partition]
+
             total_messages += latest_offset - earliest_offset
-        topic_details['total_messages'] = total_messages
+
         client.close()
+
+        return total_messages
+
     except Exception as e:
-        print(f"Error getting offsets for {env}-{topic_name}: {e}")
+
+        print(f"Error getting offsets for {env}-{full_topic_name}: {e}")
+
+        return 0
+
+
+
+def list_topics(envs_to_list, output_format='simple'):
+
+    results = {}
+
+    for env in envs_to_list:
+
+        if env in topics:
+
+            topic_list = []
+
+            for full_topic_name, data in topics[env].items():
+
+                topic_list.append({
+
+                    'full_topic_name': full_topic_name,
+
+                    'short_name': data['short_name'],
+
+                    'enrichment': data['enrichment'],
+
+                    'region': data['region'],
+
+                    'date': data['date']
+
+                })
+
+            results[env] = topic_list
+
+        else:
+
+            results[env] = []
+
+
+
+    if output_format == 'json':
+
+        print(json.dumps(results, indent=2))
+
+    else:
+
+        print("\nList of topics per environment:")
+
+        for env, topic_list in results.items():
+
+            print(f"Environment: {env}")
+
+            for topic in topic_list:
+
+                print(f" Topic: {topic['full_topic_name']} (Short: {topic['short_name']}, Enrichment: {topic['enrichment']}, Region: {topic['region']}, Date: {topic['date']})")
+
+
+
+def detailed_list(envs_to_detail, output_format='simple'):
+
+    results = {}
+
+    for env in envs_to_detail:
+
+        if env in topics:
+
+            bootstrap_servers = get_bootstrap_servers(env)
+
+            offset_threads = []
+
+            for full_topic_name in topics[env].keys():
+
+                thread = threading.Thread(target=lambda e, bs, tn: topics[e][tn]['total_messages'] := get_offsets(e, bs, tn), args=(env, bootstrap_servers, full_topic_name))
+
+                offset_threads.append(thread)
+
+                thread.start()
+
+            for thread in offset_threads:
+
+                thread.join()
+
+
+
+            topic_details = []
+
+            for full_topic_name, data in topics[env].items():
+
+                topic_details.append({
+
+                    'short_name': data['short_name'],
+
+                    'enrichment': data['enrichment'],
+
+                    'region': data['region'],
+
+                    'date': data['date'],
+
+                    'full_topic_name': full_topic_name,
+
+                    'total_messages': data['total_messages']
+
+                })
+
+            results[env] = topic_details
+
+        else:
+
+            results[env] = []
+
+
+
+    if output_format == 'json':
+
+        print(json.dumps(results, indent=2))
+
+    else:
+
+        print("\nDetailed list of topics with total messages per environment:")
+
+        for env, topic_details in results.items():
+
+            print(f"Environment: {env}")
+
+            for detail in topic_details:
+
+                print(f" Short: {detail['short_name']}, Enrichment: {detail['enrichment']}, Region: {detail['region']}, Date: {detail['date']}, Full: {detail['full_topic_name']}, Total Messages: {detail['total_messages']}")
+
+
+
+def compare_topics(envs_to_compare, output_format='simple'):
+
+    if len(envs_to_compare) != 2:
+
+        print("Error: Comparison requires exactly two environments.")
+
+        return
+
+
+
+    env1, env2 = envs_to_compare
+
+    comparison_results = []
+
+    all_topics = set(topics.get(env1, {}).keys()) | set(topics.get(env2, {}).keys())
+
+
+
+    for full_topic_name in all_topics:
+
+        topic_info_env1 = topics.get(env1, {}).get(full_topic_name)
+
+        topic_info_env2 = topics.get(env2, {}).get(full_topic_name)
+
+
+
+        short_name = topic_info_env1['short_name'] if topic_info_env1 else topic_info_env2['short_name'] if topic_info_env2 else None
+
+        enrichment = topic_info_env1['enrichment'] if topic_info_env1 else topic_info_env2['enrichment'] if topic_info_env2 else None
+
+        region = topic_info_env1['region'] if topic_info_env1 else topic_info_env2['region'] if topic_info_env2 else None
+
+        date = topic_info_env1['date'] if topic_info_env1 else topic_info_env2['date'] if topic_info_env2 else None
+
+        messages_env1 = topic_info_env1['total_messages'] if topic_info_env1 else 0
+
+        messages_env2 = topic_info_env2['total_messages'] if topic_info_env2 else 0
+
+        diff = messages_env1 - messages_env2
+
+
+
+        if short_name and enrichment and region and date:
+
+            comparison_results.append({
+
+                'topic': short_name,
+
+                'enrichment': enrichment,
+
+                'region': region,
+
+                'date': date,
+
+                env1: messages_env1,
+
+                f'TotalMessages_{env1.upper()}': messages_env1,
+
+                env2: messages_env2,
+
+                f'TotalMessages_{env2.upper()}': messages_env2,
+
+                'Diff': diff
+
+            })
+
+
+
+    if output_format == 'json':
+
+        print(json.dumps(comparison_results, indent=2))
+
+    else:
+
+        print(f"\nComparing topics between {env1} and {env2}:")
+
+        print("Topic,Enrichment,Region,Date,Env1,TotalMessages_{},Env2,TotalMessages_{},Diff".format(env1.upper(), env2.upper()))
+
+        for result in sorted(comparison_results, key=lambda x: (x['topic'], x['enrichment'], x['region'], x['date'])):
+
+            print(f"{result['topic']},{result['enrichment']},{result['region']},{result['date']},{env1},{result[env1]},{env2},{result[env2]},{result['Diff']}")
+
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Kafka Count Utility Script")
-    parser.add_argument("-e", "--env", required=True, help="Comma-separated environments (e.g., dev1,prod3)")
-    parser.add_argument("-d", "--date", help="Date filter for topics (e.g., 20250513)")
-    parser.add_argument("-t", "--type", help="Enrichment type filter for topics (e.g., E)")
-    parser.add_argument("--topic-filter", help="Comma-separated topic filters (e.g., BOOKINGTOOL,ORDERS)")
-    parser.add_argument("-f", "--file", default="bootstrap_servers.txt", help="File containing environment and bootstrap Server list")
-    parser.add_argument("--get-offset", action="store_true", help="Fetch offsets for topics")
+
+    parser = argparse.ArgumentParser(description="Kafka Topic Utility Script")
+
+    parser.add_argument("-e", "--env", required=True, help="Comma-separated environments to process (e.g., prod3,prod4)")
+
+    parser.add_argument("--topic", help="Filter by short topic name (e.g., WEB)")
+
+    parser.add_argument("--enrichment", help="Filter by enrichment type (e.g., E, S, X)")
+
+    parser.add_argument("--date", help="Filter by date (e.g., 20250516)")
+
+    parser.add_argument("-p", "--action", choices=['list', 'compare', 'detailed_list'], required=True, help="Action to perform: list, detailed_list, or compare")
+
+    parser.add_argument("--output-format", choices=['simple', 'json'], default='simple', help="Output format: simple or json")
+
+
 
     args = parser.parse_args()
 
-    target_envs = [env.strip() for env in args.env.split(',')]
-    date_filter = args.date
-    type_filter = args.type
-    topic_filter_list = [topic.strip() for topic in args.topic_filter.split(',')] if args.topic_filter else None
-    bootstrap_file = args.file
-    fetch_offsets = args.get_offset
 
-    threads = []
+
+    target_envs = [env.strip() for env in args.env.split(',')]
+
+    topic_filter = args.topic
+
+    enrichment_filter = args.enrichment
+
+    date_filter = args.date
+
+    action = args.action
+
+    output_format = args.output_format
+
+
+
+    fetch_threads = []
+
     for env in target_envs:
-        bootstrap_servers = get_bootstrap_servers_from_file(bootstrap_file, env)
-        thread = threading.Thread(target=fetch_topics, args=(env, bootstrap_servers, date_filter, type_filter, topic_filter_list))
-        threads.append(thread)
+
+        bootstrap_servers = get_bootstrap_servers(env)
+
+        thread = threading.Thread(target=fetch_topics, args=(env, bootstrap_servers, topic_filter, enrichment_filter, date_filter))
+
+        fetch_threads.append(thread)
+
         thread.start()
 
-    for thread in threads:
+
+
+    for thread in fetch_threads:
+
         thread.join()
 
-    print("List of topics:")
-    for topic_info in topics:
-        print(f"Env: {topic_info['env']}, Topic: {topic_info['topic_name']}, Details: {topic_info['details']}")
 
-    if fetch_offsets:
-        offset_threads = []
-        for topic_info in topics:
-            bootstrap_servers = get_bootstrap_servers_from_file(bootstrap_file, topic_info['env'])
-            thread = threading.Thread(target=get_offsets, args=(topic_info['env'], bootstrap_servers, topic_info['topic_name'], topic_info['details']))
-            offset_threads.append(thread)
-            thread.start()
 
-        for thread in offset_threads:
-            thread.join()
+    if action == 'list':
 
-        print("\nTopic details with total messages:")
-        for topic_info in topics:
-            if "prefix" in topic_info['details'] and "env_from_topic" in topic_info['details']:
-                print(f"{topic_info['details']['prefix'].upper()}, {topic_info['details']['env_from_topic'].upper()}, {topic_info['topic_name']}, {topic_info['details']['total_messages']}")
+        list_topics(target_envs, output_format)
+
+    elif action == 'detailed_list':
+
+        detailed_list(target_envs, output_format)
+
+    elif action == 'compare':
+
+        if len(target_envs) == 2:
+
+            compare_topics(target_envs, output_format)
+
+        else:
+
+            print("Error: Comparison requires exactly two environments. Please provide two environments with -e.")
+
+
 
 if __name__ == "__main__":
+
     main()
 
-File: bootstrap_servers.txt
-dev1=your_dev1_kafka_brokers
-prod3=losthost.prod3:9092,anotherhost.prod3:9092
-staging2=your_staging2_kafka_brokers
-prod88=your_prod88_kafka_brokers
-# Add more environments and their broker lists here
 
-File: test_topic_manager.py
-import subprocess
+
+File 3: test_topic_manager.py (Python)
+
 import unittest
-import os
-import tempfile
-import re
-import json
-from unittest.mock import patch, MagicMock
 
-class TestKafkaTopicManagerWithMockData(unittest.TestCase):
+from unittest.mock import patch
+
+from topic_manager import fetch_topics, list_topics, detailed_list, compare_topics, topics
+
+from config_servers import EnvironmentConfig
+
+
+
+class TestTopicManager(unittest.TestCase):
+
+
 
     def setUp(self):
-        # Create a temporary bootstrap servers file for testing
-        self.temp_bootstrap_file = tempfile.NamedTemporaryFile(mode='w', delete=False)
-        self.temp_bootstrap_content = """
-mock_env=mock-broker:9092
-"""
-        self.temp_bootstrap_file.write(self.temp_bootstrap_content)
-        self.temp_bootstrap_file.close()
 
-        # Load the mock Kafka data from the JSON file
-        try:
-            with open("mock_kafka_data.json", "r") as f:
-                self.mock_kafka_data = json.load(f)
-            self.mock_topic_names = list(self.mock_kafka_data.keys())
-        except FileNotFoundError:
-            print("Error: mock_kafka_data.json not found. Please run mock_kafka_generator.py first.")
-            sys.exit(1)
+        # Reset the topics dictionary before each test
 
-    def tearDown(self):
-        # Clean up the temporary bootstrap servers file
-        os.unlink(self.temp_bootstrap_file.name)
+        topics.clear()
 
-    def run_script(self, *args):
-        """Helper function to run the topic_manager.py script with given arguments."""
-        command = ["python", "topic_manager.py"] + list(args)
-        process = subprocess.run(command, capture_output=True, text=True, check=False)
-        return process.returncode, process.stdout, process.stderr
+        self.config = EnvironmentConfig()
 
-    @patch('kafka.admin.KafkaAdminClient.list_topics')
-    @patch('kafka.client_async.KafkaClient')
-    @patch('kafka.consumer.simple.SimpleConsumer')
-    def test_list_topics_and_get_offsets_with_mock_data(self, MockSimpleConsumer, MockKafkaClient, mock_list_topics):
-        # Mock list_topics to return the topics from our mock data
-        mock_list_topics.return_value = self.mock_topic_names
 
-        # Mock KafkaClient and SimpleConsumer
-        mock_consumer_instance = MagicMock()
-        MockSimpleConsumer.return_value = mock_consumer_instance
 
-        # Simulate partition IDs and offsets for each topic
-        topic_partition_info = {}
-        for topic, partitions in self.mock_kafka_data.items():
-            partition_ids = list(partitions.keys())
-            mock_consumer_instance.get_partition_ids.return_value = partition_ids
-            earliest_offsets = {p: 0 for p in partition_ids}  # Mock earliest offset as 0
-            latest_offsets = partitions
-            mock_consumer_instance.get_earliest_offsets.return_value = earliest_offsets
-            mock_consumer_instance.get_latest_offsets.return_value = latest_offsets
-            topic_partition_info[topic] = sum(latest_offsets.values())
+    @patch('kafka.admin.KafkaAdminClient')
 
-        returncode, stdout, stderr = self.run_script("-e", "mock_env", "-f", self.temp_bootstrap_file.name, "--get-offset")
-        self.assertEqual(returncode, 0)
+    def test_fetch_topics_success(self, mock_admin_client):
 
-        # Assert that the "List of topics:" section contains the expected topics
-        self.assertIn("List of topics:", stdout)
-        for topic in self.mock_topic_names:
-            self.assertIn(f"Env: mock_env, Topic: {topic}", stdout)
+        mock_admin_client.return_value.list_topics.return_value = [
 
-        # Assert that the "Topic details with total messages:" section contains the correct counts
-        self.assertIn("Topic details with total messages:", stdout)
-        for topic, total_messages in topic_partition_info.items():
-            self.assertIn(f"MOCK, MOCK, {topic}, {total_messages}", stdout)
+            "WEB.E.amrs.prod3.20250517",
+
+            "COM.S.eu.prod3.20250517",
+
+            "WEB.E.amrs.prod4.20250517"
+
+        ]
+
+        fetch_topics('prod3', 'broker1:9092', date_filter='20250517')
+
+        self.assertEqual(len(topics['prod3']), 2)
+
+        self.assertIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+
+        self.assertIn("COM.S.eu.prod3.20250517", topics['prod3'])
+
+        self.assertEqual(topics['prod3']["WEB.E.amrs.prod3.20250517"]['short_name'], 'WEB')
+
+        self.assertEqual(topics['prod3']["COM.S.eu.prod3.20250517"]['enrichment'], 'S')
+
+
+
+    @patch('kafka.admin.KafkaAdminClient')
+
+    def test_fetch_topics_filter_topic(self, mock_admin_client):
+
+        mock_admin_client.return_value.list_topics.return_value = [
+
+            "WEB.E.amrs.prod3.20250517",
+
+            "COM.S.eu.prod3.20250517"
+
+        ]
+
+        fetch_topics('prod3', 'broker1:9092', topic_filter='WEB')
+
+        self.assertEqual(len(topics['prod3']), 1)
+
+        self.assertIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+
+        self.assertNotIn("COM.S.eu.prod3.20250517", topics['prod3'])
+
+
+
+    @patch('kafka.admin.KafkaAdminClient')
+
+    def test_fetch_topics_filter_enrichment(self, mock_admin_client):
+
+        mock_admin_client.return_value.list_topics.return_value = [
+
+            "WEB.E.amrs.prod3.20250517",
+
+            "COM.S.eu.prod3.20250517"
+
+        ]
+
+        fetch_topics('prod3', 'broker1:909
+
+
+
+
+
+You are absolutely right! My apologies. It seems I cut off the test_topic_manager.py script prematurely. Let me complete it for you.
+
+File 3: test_topic_manager.py (Python) - COMPLETE
+
+import unittest
+from unittest.mock import patch
+from topic_manager import fetch_topics, list_topics, detailed_list, compare_topics, topics
+from config_servers import EnvironmentConfig
+
+class TestTopicManager(unittest.TestCase):
+
+    def setUp(self):
+        # Reset the topics dictionary before each test
+        topics.clear()
+        self.config = EnvironmentConfig()
+
+    @patch('kafka.admin.KafkaAdminClient')
+    def test_fetch_topics_success(self, mock_admin_client):
+        mock_admin_client.return_value.list_topics.return_value = [
+            "WEB.E.amrs.prod3.20250517",
+            "COM.S.eu.prod3.20250517",
+            "WEB.E.amrs.prod4.20250517"
+        ]
+        fetch_topics('prod3', 'broker1:9092', date_filter='20250517')
+        self.assertEqual(len(topics['prod3']), 2)
+        self.assertIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+        self.assertIn("COM.S.eu.prod3.20250517", topics['prod3'])
+        self.assertEqual(topics['prod3']["WEB.E.amrs.prod3.20250517"]['short_name'], 'WEB')
+        self.assertEqual(topics['prod3']["COM.S.eu.prod3.20250517"]['enrichment'], 'S')
+
+    @patch('kafka.admin.KafkaAdminClient')
+    def test_fetch_topics_filter_topic(self, mock_admin_client):
+        mock_admin_client.return_value.list_topics.return_value = [
+            "WEB.E.amrs.prod3.20250517",
+            "COM.S.eu.prod3.20250517"
+        ]
+        fetch_topics('prod3', 'broker1:9092', topic_filter='WEB')
+        self.assertEqual(len(topics['prod3']), 1)
+        self.assertIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+        self.assertNotIn("COM.S.eu.prod3.20250517", topics['prod3'])
+
+    @patch('kafka.admin.KafkaAdminClient')
+    def test_fetch_topics_filter_enrichment(self, mock_admin_client):
+        mock_admin_client.return_value.list_topics.return_value = [
+            "WEB.E.amrs.prod3.20250517",
+            "COM.S.eu.prod3.20250517"
+        ]
+        fetch_topics('prod3', 'broker1:9092', enrichment_filter='S')
+        self.assertEqual(len(topics['prod3']), 1)
+        self.assertNotIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+        self.assertIn("COM.S.eu.prod3.20250517", topics['prod3'])
+
+    @patch('kafka.admin.KafkaAdminClient')
+    def test_fetch_topics_filter_date(self, mock_admin_client):
+        mock_admin_client.return_value.list_topics.return_value = [
+            "WEB.E.amrs.prod3.20250516",
+            "WEB.E.amrs.prod3.20250517"
+        ]
+        fetch_topics('prod3', 'broker1:9092', date_filter='20250516')
+        self.assertEqual(len(topics['prod3']), 1)
+        self.assertIn("WEB.E.amrs.prod3.20250516", topics['prod3'])
+        self.assertNotIn("WEB.E.amrs.prod3.20250517", topics['prod3'])
+
+    def test_list_topics_simple_output(self):
+        topics['test_env'] = {
+            "TOPIC1.E.r1.test_env.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101'},
+            "TOPIC2.S.r2.test_env.20230102": {'short_name': 'TOPIC2', 'enrichment': 'S', 'region': 'r2', 'date': '20230102'}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            list_topics(['test_env'], output_format='simple')
+            output = mock_stdout.getvalue()
+            self.assertIn("List of topics per environment:", output)
+            self.assertIn("Environment: test_env", output)
+            self.assertIn("Topic: TOPIC1.E.r1.test_env.20230101 (Short: TOPIC1, Enrichment: E, Region: r1, Date: 20230101)", output)
+            self.assertIn("Topic: TOPIC2.S.r2.test_env.20230102 (Short: TOPIC2, Enrichment: S, Region: r2, Date: 20230102)", output)
+
+    def test_list_topics_json_output(self):
+        topics['test_env'] = {
+            "TOPIC1.E.r1.test_env.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101'}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            list_topics(['test_env'], output_format='json')
+            output = mock_stdout.getvalue()
+            self.assertIn('{\n  "test_env": [\n    {\n      "full_topic_name": "TOPIC1.E.r1.test_env.20230101",\n      "short_name": "TOPIC1",\n      "enrichment": "E",\n      "region": "r1",\n      "date": "20230101"\n    }\n  ]\n}', output)
+
+    @patch('topic_manager.get_offsets', return_value=100)
+    def test_detailed_list_simple_output(self, mock_get_offsets):
+        topics['test_env'] = {
+            "TOPIC1.E.r1.test_env.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 0}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            detailed_list(['test_env'], output_format='simple')
+            output = mock_stdout.getvalue()
+            self.assertIn("Detailed list of topics with total messages per environment:", output)
+            self.assertIn("Environment: test_env", output)
+            self.assertIn("Short: TOPIC1, Enrichment: E, Region: r1, Date: 20230101, Full: TOPIC1.E.r1.test_env.20230101, Total Messages: 100", output)
+
+    @patch('topic_manager.get_offsets', return_value=200)
+    def test_detailed_list_json_output(self, mock_get_offsets):
+        topics['test_env'] = {
+            "TOPIC1.E.r1.test_env.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 0}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            detailed_list(['test_env'], output_format='json')
+            output = mock_stdout.getvalue()
+            self.assertIn('{\n  "test_env": [\n    {\n      "short_name": "TOPIC1",\n      "enrichment": "E",\n      "region": "r1",\n      "date": "20230101",\n      "full_topic_name": "TOPIC1.E.r1.test_env.20230101",\n      "total_messages": 200\n    }\n  ]\n}', output)
+
+    def test_compare_topics_simple_output(self):
+        topics['env1'] = {
+            "TOPIC1.E.r1.env1.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 10},
+            "TOPIC2.S.r2.env1.20230102": {'short_name': 'TOPIC2', 'enrichment': 'S', 'region': 'r2', 'date': '20230102', 'total_messages': 20}
+        }
+        topics['env2'] = {
+            "TOPIC1.E.r1.env2.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 15}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            compare_topics(['env1', 'env2'], output_format='simple')
+            output = mock_stdout.getvalue()
+            self.assertIn("Comparing topics between env1 and env2:", output)
+            self.assertIn("Topic,Enrichment,Region,Date,Env1,TotalMessages_ENV1,Env2,TotalMessages_ENV2,Diff", output)
+            self.assertIn("TOPIC1,E,r1,20230101,env1,10,env2,15,-5", output)
+            self.assertIn("TOPIC2,S,r2,20230102,env1,20,env2,0,20", output)
+
+    def test_compare_topics_json_output(self):
+        topics['env1'] = {
+            "TOPIC1.E.r1.env1.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 10}
+        }
+        topics['env2'] = {
+            "TOPIC1.E.r1.env2.20230101": {'short_name': 'TOPIC1', 'enrichment': 'E', 'region': 'r1', 'date': '20230101', 'total_messages': 15}
+        }
+        with patch('sys.stdout') as mock_stdout:
+            compare_topics(['env1', 'env2'], output_format='json')
+            output = mock_stdout.getvalue()
+            self.assertIn('[', output)
+            self.assertIn('{', output)
+            self.assertIn('"topic": "TOPIC1"', output)
+            self.assertIn('"enrichment": "E"', output)
+            self.assertIn('"region": "r1"', output)
+            self.assertIn('"date": "20230101"', output)
+            self.assertIn('"env1": 10', output)
+            self.assertIn('"TotalMessages_ENV1": 10', output)
+            self.assertIn('"env2": 15', output)
+            self.assertIn('"TotalMessages_ENV2": 15', output)
+            self.assertIn('"Diff": -5', output)
+            self.assertIn(']', output)
+            self.assertIn('}', output)
+
+    def test_compare_topics_invalid_env_count(self):
+        with patch('sys.stdout') as mock_stdout:
+            compare_topics(['env1'], output_format='simple')
+            output = mock_stdout.getvalue()
+            self.assertIn("Error: Comparison requires exactly two environments.", output)
 
 if __name__ == '__main__':
     unittest.main()
+Stimulated Outputs (Plain Text):
 
-File: mock_kafka_generator.py
-import json
-import random
+Scenario 1: -p list (Simple Output)
 
-def create_mock_kafka_data(num_topics=None):
-    """
-    Generates mock Kafka topic data with random partitions and offsets.
+List of topics per environment:
+Environment: PROD3
+  Topic: WEB.E.amrs.prod3.20250516 (Short: WEB, Enrichment: E, Region: AMRS, Date: 20250516)
+  Topic: COM.S.eu.prod3.20250516 (Short: COM, Enrichment: S, Region: EU, Date: 20250516)
+  Topic: WEB.E.eu.prod3.20250517 (Short: WEB, Enrichment: E, Region: EU, Date: 20250517)
+Environment: PROD4
+  Topic: WEB.E.amrs.prod4.20250516 (Short: WEB, Enrichment: E, Region: AMRS, Date: 20250516)
+  Topic: COM.X.us.prod4.20250517 (Short: COM, Enrichment: X, Region: US, Date: 20250517)
+Scenario 2: -p list --output-format json (JSON Output)
 
-    Args:
-        num_topics (int, optional): The maximum number of topics to generate.
-                                     Defaults to a random number up to 10.
+{
+  "PROD3": [
+    {
+      "full_topic_name": "WEB.E.amrs.prod3.20250516",
+      "short_name": "WEB",
+      "enrichment": "E",
+      "region": "AMRS",
+      "date": "20250516"
+    },
+    {
+      "full_topic_name": "COM.S.eu.prod3.20250516",
+      "short_name": "COM",
+      "enrichment": "S",
+      "region": "EU",
+      "date": "20250516"
+    },
+    {
+      "full_topic_name": "WEB.E.eu.prod3.20250517",
+      "short_name": "WEB",
+      "enrichment": "E",
+      "region": "EU",
+      "date": "20250517"
+    }
+  ],
+  "PROD4": [
+    {
+      "full_topic_name": "WEB.E.amrs.prod4.20250516",
+      "short_name": "WEB",
+      "enrichment": "E",
+      "region": "AMRS",
+      "date": "20250516"
+    },
+    {
+      "full_topic_name": "COM.X.us.prod4.20250517",
+      "short_name": "COM",
+      "enrichment": "X",
+      "region": "US",
+      "date": "20250517"
+    }
+  ]
+}
+Scenario 3: -p detailed_list (Simple Output)
 
-    Returns:
-        dict: A dictionary representing the mock Kafka data, where keys are
-              topic names and values are dictionaries of partition offsets.
-              Example:
-              {
-                  "topic_a": {0: 55, 1: 88, 2: 12},
-                  "topic_b": {0: 10, 1: 95, 2: 30, 3: 70},
-                  ...
-              }
-    """
-    if num_topics is None:
-        num_topics = random.randint(1, 10)
-
-    mock_data = {}
-    for i in range(num_topics):
-        topic_name = f"mock_topic_{chr(ord('a') + i)}"
-        num_partitions = random.randint(10, 20)
-        partitions_data = {}
-        for partition in range(num_partitions):
-            offset = random.randint(0, 100)
-            partitions_data[partition] = offset
-        mock_data[topic_name] = partitions_data
-    return mock_data
-
-def save_mock_kafka_data(data, filename="mock_kafka_data.json"):
-    """
-    Saves the mock Kafka data to a JSON file.
-
-    Args:
-        data (dict): The mock Kafka data dictionary.
-        filename (str, optional): The name of the file to save to.
-                                 Defaults to "mock_kafka_data.json".
-    """
-    with open(filename, 'w') as f:
-        json.dump(data, f, indent=4)
-    print(f"Mock Kafka data saved to '{filename}'")
-
-if __name__ == "__main__":
-    mock_kafka = create_mock_kafka_data()
-    save_mock_kafka_data(mock_kafka)
-    print("\nExample of generated mock data:")
-    print(json.dumps(mock_kafka, indent=4))
-
-You can copy and paste the content of each code block into a plain text file and then save them with the respective names (topic_manager.py, bootstrap_servers.txt, test_topic_manager.py, and mock_kafka_generator.py). Remember to run mock_kafka_generator.py first to create the mock_kafka_data.json file before running the tests.
+Detailed list of topics with total messages per environment:
+Environment: PROD3
+  Short: WEB, Enrichment: E, Region: AMRS, Date: 20250516, Full: WEB.E.amrs.prod3.20250516, Total Messages: 1500
+  Short: COM, Enrichment: S, Region: EU, Date: 20250516, Full: COM.S.eu.prod3.20250516, Total Messages: 2200
+  Short: WEB, Enrichment: E, Region: EU, Date: 20250517, Full: WEB.E.eu.prod3.20250517, Total Messages: 700
+Environment: PROD4
+  Short: WEB, Enrichment: E, Region: AMRS, Date: 20250516, Full: WEB.E.amrs.prod4.2025
