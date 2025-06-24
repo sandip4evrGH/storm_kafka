@@ -1,0 +1,367 @@
+https://grok.com/share/bGVnYWN5_e13a3cc6-9a27-4604-a23a-7835f779748c
+Migrating an Apache Kafka cluster from ZooKeeper to KRaft in Kafka 3.9, while maintaining SASL/SSL security and ACLs, is a complex process that requires careful planning and execution. Below, I outline the configuration changes and testing commands for this migration. The process is based on Apache Kafka and Confluent documentation, with specific considerations for SASL/SSL and ACLs. I’ll break it down into steps, covering configuration changes, migration steps, and testing commands for various scenarios.
+
+---
+
+### **Overview of Migration**
+The migration involves moving metadata management from ZooKeeper to a KRaft quorum, updating security configurations (SASL/SSL), and transitioning ACLs from ZooKeeper’s `AclAuthorizer` to KRaft’s `StandardAuthorizer`. Kafka 3.9 supports KRaft as a production-ready mode, and the migration process is generally available in Confluent Platform 7.6.1 or later (recommended 7.7.0 or later). The process includes:
+1. Preparing the existing ZooKeeper-based cluster.
+2. Configuring KRaft controllers and enabling migration.
+3. Migrating metadata and ACLs.
+4. Transitioning brokers to KRaft mode.
+5. Testing connectivity, authentication, authorization, and message production/consumption.
+
+**Assumptions**:
+- You are running Kafka 3.9 or Confluent Platform 7.7.0+.
+- The cluster uses SASL/SSL with SCRAM-SHA-512 for authentication and `AclAuthorizer` for authorization.
+- You have a multi-broker cluster with ZooKeeper for metadata.
+- You are performing a rolling migration to minimize downtime.
+- A test environment mirrors production for validation.
+
+---
+
+### **Step 1: Prepare the ZooKeeper-Based Cluster**
+Before starting, ensure your cluster is ready for migration.
+
+#### **Configuration Changes**
+1. **Upgrade to Kafka 3.9**:
+   - Upgrade all brokers to Kafka 3.9 while keeping them in ZooKeeper mode. Ensure the `inter.broker.protocol.version` is set to `3.9` in `server.properties` to align with the Kafka version.
+     ```properties
+     inter.broker.protocol.version=3.9
+     ```
+
+2. **Backup ZooKeeper and Kafka Data**:
+   - Back up ZooKeeper data (`/var/lib/zookeeper`) and Kafka log directories (`log.dirs`).
+   - Document all topics, partitions, replication factors, and custom configurations.
+
+3. **Verify Existing Security Configurations**:
+   - Ensure SASL/SSL is configured correctly in `server.properties` for all brokers. Example:
+     ```properties
+     listeners=SASL_SSL://:9093
+     advertised.listeners=SASL_SSL://<hostname>:9093
+     security.inter.broker.protocol=SASL_SSL
+     sasl.enabled.mechanisms=SCRAM-SHA-512
+     sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+     ssl.keystore.location=/path/to/kafka.keystore.jks
+     ssl.keystore.password=<keystore_password>
+     ssl.key.password=<key_password>
+     ssl.truststore.location=/path/to/kafka.truststore.jks
+     ssl.truststore.password=<truststore_password>
+     ssl.client.auth=required
+     authorizer.class.name=kafka.security.auth.SimpleAclAuthorizer
+     super.users=User:admin
+     zookeeper.connect=localhost:2181
+     zookeeper.set.acl=true
+     ```
+   - JAAS configuration (`kafka_server_jaas.conf`):
+     ```conf
+     KafkaServer {
+       org.apache.kafka.common.security.scram.ScramLoginModule required
+       username="admin"
+       password="admin-secret";
+     };
+     Client {
+       org.apache.kafka.common.security.plain.PlainLoginModule required
+       username="admin"
+       password="admin-secret";
+     };
+     ```
+   - Export JAAS configuration:
+     ```bash
+     export KAFKA_OPTS="-Djava.security.auth.login.config=/path/to/kafka_server_jaas.conf"
+     ```
+
+4. **List Existing ACLs**:
+   - Use `kafka-acls.sh` to export all ACLs for migration:
+     ```bash
+     ./bin/kafka-acls.sh --authorizer-properties zookeeper.connect=localhost:2181 --list > acls_backup.txt
+     ```
+
+5. **Review KRaft Limitations**:
+   - KRaft does not support SCRAM for controller-to-controller authentication; use SASL/PLAIN or other mechanisms (e.g., OAUTHBEARER) for controllers.
+   - Ensure all SASL credentials are created before starting KRaft controllers.
+
+---
+
+### **Step 2: Configure KRaft Controllers**
+KRaft requires dedicated controller nodes or combined broker-controller roles. For production, use isolated controllers.
+
+#### **Configuration Changes**
+1. **Set Up KRaft Controller Configuration**:
+   - Create a `controller.properties` file for each controller node:
+     ```properties
+     process.roles=controller
+     node.id=3000
+     controller.quorum.voters=3000@localhost:9093,3001@localhost:9094,3002@localhost:9095
+     listeners=CONTROLLER://:9093
+     listener.security.protocol.map=CONTROLLER:SASL_SSL
+     security.inter.broker.protocol=SASL_SSL
+     sasl.enabled.mechanisms=PLAIN
+     sasl.mechanism.controller.protocol=PLAIN
+     listener.name.controller.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+       username="admin" \
+       password="admin-secret" \
+       user_admin="admin-secret" \
+       user_alice="alice-secret";
+     ssl.keystore.location=/path/to/kafka.keystore.jks
+     ssl.keystore.password=<keystore_password>
+     ssl.key.password=<key_password>
+     ssl.truststore.location=/path/to/kafka.truststore.jks
+     ssl.truststore.password=<truststore_password>
+     ssl.client.auth=required
+     authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+     log.dirs=/tmp/kraft-controller-logs
+     ```
+   - Notes:
+     - `node.id` must be unique and distinct from broker IDs (e.g., 3000, 3001, 3002).
+     - Use `PLAIN` for `sasl.mechanism.controller.protocol` as SCRAM is not supported for controller communication in KRaft.
+     - `StandardAuthorizer` is used for KRaft instead of `AclAuthorizer`.
+
+2. **Generate Unique Cluster ID**:
+   - Generate a UUID for the KRaft cluster:
+     ```bash
+     ./bin/kafka-storage.sh random-uuid
+     ```
+     Example output: `a1b2c3d4-e5f6-7890-abcd-ef1234567890`
+
+3. **Format KRaft Storage**:
+   - Format the storage directory for each controller:
+     ```bash
+     ./bin/kafka-storage.sh format -t a1b2c3d4-e5f6-7890-abcd-ef1234567890 -c /path/to/controller.properties
+     ```
+
+4. **Start KRaft Controllers**:
+   - Start each controller node:
+     ```bash
+     ./bin/kafka-server-start.sh /path/to/controller.properties
+     ```
+
+---
+
+### **Step 3: Enable Migration in ZooKeeper-Based Cluster**
+Enable migration mode to allow metadata to be copied from ZooKeeper to KRaft controllers.
+
+#### **Configuration Changes**
+1. **Update Broker Configurations**:
+   - Add migration properties to `server.properties` for each broker:
+     ```properties
+     zookeeper.metadata.migration.enable=true
+     controller.quorum.voters=3000@localhost:9093,3001@localhost:9094,3002@localhost:9095
+     controller.listener.names=CONTROLLER
+     listener.security.protocol.map=SASL_SSL:SASL_SSL,CONTROLLER:SASL_SSL
+     ```
+   - Retain existing SASL/SSL and ZooKeeper configurations.
+
+2. **Restart Brokers**:
+   - Perform a rolling restart of brokers to apply the migration settings:
+     ```bash
+     ./bin/kafka-server-stop.sh
+     ./bin/kafka-server-start.sh /path/to/server.properties
+     ```
+
+3. **Monitor Migration Progress**:
+   - Check the migration state using JMX:
+     ```bash
+     kafka-run-class.sh kafka.tools.JmxTool --jmx-url service:jmx:rmi:///jndi/rmi://localhost:9999/jmxrmi --object-name kafka.controller:type=KafkaController,name=ZkMigrationState
+     ```
+   - The state transitions from `PRE_MIGRATION` to `MIGRATION_COMPLETED` when metadata is fully copied to the `__cluster_metadata` topic.
+
+---
+
+### **Step 4: Transition Brokers to KRaft Mode**
+Once metadata migration is complete, reconfigure brokers to run in KRaft mode.
+
+#### **Configuration Changes**
+1. **Update Broker Configurations**:
+   - Modify `server.properties` for each broker:
+     ```properties
+     process.roles=broker
+     node.id=1
+     listeners=SASL_SSL://:9093
+     advertised.listeners=SASL_SSL://<hostname>:9093
+     security.inter.broker.protocol=SASL_SSL
+     sasl.enabled.mechanisms=SCRAM-SHA-512
+     sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+     sasl.mechanism.controller.protocol=PLAIN
+     controller.quorum.voters=3000@localhost:9093,3001@localhost:9094,3002@localhost:9095
+     controller.listener.names=CONTROLLER
+     listener.security.protocol.map=SASL_SSL:SASL_SSL,CONTROLLER:SASL_SSL
+     ssl.keystore.location=/path/to/kafka.keystore.jks
+     ssl.keystore.password=<keystore_password>
+     ssl.key.password=<key_password>
+     ssl.truststore.location=/path/to/kafka.truststore.jks
+     ssl.truststore.password=<truststore_password>
+     ssl.client.auth=required
+     authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
+     super.users=User:admin
+     log.dirs=/tmp/kraft-broker-logs
+     ```
+   - Notes:
+     - Set `process.roles=broker` to indicate the node is a broker only.
+     - Use `node.id` consistent with the existing broker ID.
+     - Remove ZooKeeper properties (` ascend: zookeeper.connect, zookeeper.set.acl.
+     - Change `authorizer.class.name` to `StandardAuthorizer`.
+     - Format the broker storage:
+       ```bash
+       ./bin/kafka-storage.sh format -t a1b2c3d4-e5f6-7890-abcd-ef1234567890 -c /path/to/server.properties
+       ```
+
+2. **Restart Brokers**:
+   - Perform a rolling restart:
+     ```bash
+     ./bin/kafka-server-stop.sh
+     ./bin/kafka-server-start.sh /path/to/server.properties
+     ```
+
+3. **Migrate ACLs**:
+   - Use the `acls_backup.txt` from Step 1 to recreate ACLs in KRaft:
+     ```bash
+     ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --add --allow-principal User:demouser --operation Create --operation Describe --topic demo-topic
+     ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --add --allow-principal User:demouser --producer --topic demo-topic
+     ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --add --allow-principal User:demouser --consumer --topic demo-topic --group test-consumer-group
+     ```
+   - Client configuration (`ssl-user-config.properties`):
+     ```properties
+     bootstrap.servers=<hostname>:9093
+     security.protocol=SASL_SSL
+     sasl.mechanism=SCRAM-SHA-512
+     sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="demouser" password="secret";
+     ssl.truststore.location=/path/to/kafka.truststore.jks
+     ssl.truststore.password=<truststore_password>
+     ```
+
+4. **Remove ZooKeeper Dependency**:
+   - Once all brokers are in KRaft mode and migration is complete, shut down ZooKeeper:
+     ```bash
+     ./bin/zookeeper-server-stop.sh
+     ```
+
+---
+
+### **Step 5: Testing Scenarios**
+Below are commands to test various scenarios to ensure the migrated cluster works correctly.
+
+#### **Scenario 1: Verify Broker Connectivity**
+- **Test**: Check if brokers are running and connected to KRaft controllers.
+- **Command**:
+  ```bash
+  ./bin/kafka-broker-api-versions.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties
+  ```
+- **Expected Output**: Lists API versions supported by brokers, indicating successful connectivity.
+
+#### **Scenario 2: Test Topic Creation**
+- **Test**: Create a topic to verify broker functionality.
+- **Command**:
+  ```bash
+  ./bin/kafka-topics.sh --create --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --replication-factor 3 --partitions 3 --topic test-sasl
+  ```
+- **Expected Output**: `Created topic test-sasl`
+- **Validation**: List topics to confirm:
+  ```bash
+  ./bin/kafka-topics.sh --list --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties
+  ```
+
+#### **Scenario 3: Test SASL/SSL Authentication (Invalid Credentials)**
+- **Test**: Attempt to produce a message with incorrect credentials.
+- **Command**:
+  ```bash
+  ./bin/kafka-console-producer.sh --broker-list <hostname>:9093 --topic test-sasl --producer.config /path/to/ssl-user-config.properties
+  ```
+  - Modify `ssl-user-config.properties` with wrong password (e.g., `password="wrong-secret"`).
+- **Expected Output**: Error like:
+  ```
+  [ERROR] Connection to node -1 failed authentication due to: Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-512
+  ```
+
+#### **Scenario 4: Test ACL Authorization (No Permissions)**
+- **Test**: Attempt to produce to a topic without producer permissions.
+- **Command**:
+  ```bash
+  ./bin/kafka-console-producer.sh --broker-list <hostname>:9093 --topic test-sasl --producer.config /path/to/ssl-user-config.properties
+  ```
+- **Expected Output**: Error like:
+  ```
+  org.apache.kafka.common.errors.TopicAuthorizationException: Not authorized to access topics: [test-sasl]
+  ```
+- **Fix**: Add producer ACL:
+  ```bash
+  ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --add --allow-principal User:demouser --producer --topic test-sasl
+  ```
+
+#### **Scenario 5: Test Message Production and Consumption**
+- **Test**: Produce and consume messages to verify end-to-end functionality.
+- **Producer Command**:
+  ```bash
+  ./bin/kafka-console-producer.sh --broker-list <hostname>:9093 --topic test-sasl --producer.config /path/to/ssl-user-config.properties
+  ```
+  - Input messages: `message1`, `message2`, `message3`.
+- **Consumer Command**:
+  ```bash
+  ./bin/kafka-console-consumer.sh --bootstrap-server <hostname>:9093 --topic test-sasl --from-beginning --consumer.config /path/to/ssl-user-config.properties
+  ```
+- **Expected Output**: Consumer outputs:
+  ```
+  message1
+  message2
+  message3
+  ```
+
+#### **Scenario 6: Test Consumer Group Functionality**
+- **Test**: Verify consumer group operations with ACLs.
+- **Command**:
+  ```bash
+  ./bin/kafka-console-consumer.sh --bootstrap-server <hostname>:9093 --topic test-sasl --group test-consumer-group --consumer.config /path/to/ssl-user-config.properties
+  ```
+- **Expected Output**: Consumes messages if ACLs are correctly set; otherwise, `GroupAuthorizationException`.
+- **Fix**: Add consumer ACL:
+  ```bash
+  ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --add --allow-principal User:demouser --consumer --topic test-sasl --group test-consumer-group
+  ```
+
+#### **Scenario 7: Verify ACLs in KRaft**
+- **Test**: List ACLs to ensure they were migrated correctly.
+- **Command**:
+  ```bash
+  ./bin/kafka-acls.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties --list
+  ```
+- **Expected Output**: Lists ACLs, e.g.:
+  ```
+  Current ACLs for resource `Topic:LITERAL:test-sasl`:
+    User:demouser has Allow permission for operations: Create, Describe, Write from hosts: *
+  ```
+
+#### **Scenario 8: Test Controller Connectivity**
+- **Test**: Ensure brokers can communicate with KRaft controllers.
+- **Command**:
+  ```bash
+  ./bin/kafka-features.sh --bootstrap-server <hostname>:9093 --command-config /path/to/ssl-user-config.properties
+  ```
+- **Expected Output**: Lists feature metadata, indicating controllers are accessible.
+
+#### **Scenario 9: Test Rollback (Optional, Before Finalizing Migration)**
+- **Test**: Revert to ZooKeeper mode if migration fails (only possible before removing ZooKeeper).
+- **Steps**:
+  - Revert `server.properties` to original ZooKeeper settings.
+  - Restart brokers:
+    ```bash
+    ./bin/kafka-server-stop.sh
+    ./bin/kafka-server-start.sh /path/to/server.properties
+    ```
+
+---
+
+### **Key Considerations**
+- **SASL/PLAIN for Controllers**: KRaft requires `PLAIN` for controller-to-controller communication, unlike SCRAM-SHA-512 used for broker-client communication.
+- **ACL Migration**: Manually recreate ACLs using `kafka-acls.sh` as automatic migration is not supported.
+- **Testing Environment**: Perform dry runs in a test environment to catch issues.
+- **Rollback**: Possible only during the dual-write phase (before removing ZooKeeper).
+- **Monitoring**: Use JMX metrics or tools like Offset Explorer to monitor cluster health.
+
+**Sources**:
+- Apache Kafka Documentation[](https://kafka.apache.org/090/documentation.html)[](https://kafka.apache.org/documentation/)
+- Confluent KRaft Migration Guide[](https://docs.confluent.io/platform/current/installation/migrate-zk-kraft.html)
+- AutoMQ Kafka ACLs Guide[](https://www.automq.com/blog/kafka-acls-authorization-usage-best-practices)[](https://github.com/AutoMQ/automq/wiki/Kafka-ACLs-Authorization:-Usage-&-Best-Practices)
+- Red Hat KRaft Documentation[](https://docs.redhat.com/en/documentation/red_hat_streams_for_apache_kafka/2.7/html-single/using_streams_for_apache_kafka_on_rhel_in_kraft_mode/index)
+- Medium Articles on KRaft and SASL[](https://rafael-natali.medium.com/running-kafka-in-kubernetes-with-kraft-mode-and-sasl-authentication-f7350eaba81f)[](https://medium.com/%40hjdjoo/how-to-actually-configure-a-kafka-cluster-in-kraft-mode-for-testing-development-8f90f09e36b1)
+
+This guide covers the full migration process with a focus on SASL/SSL and ACLs. Test thoroughly in a non-production environment before applying to production to avoid data loss or downtime. If you need specific details for your setup (e.g., Kubernetes, Confluent Platform), let me know!
