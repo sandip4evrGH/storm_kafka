@@ -1,0 +1,194 @@
+### Prerequisites
+To set up a 6-node Kafka KRaft cluster with SASL/SCRAM authentication, SSL encryption (SASL_SSL protocol), and ACL authorization, you'll need:
+- 6 servers (e.g., VMs or cloud instances) with Ubuntu 22.04 or similar, each with at least 4GB RAM and 2 CPUs. Ensure they can communicate over the network (firewall ports open: 9092 for client traffic, 9093 for controller/inter-broker).
+- A domain or hostnames for each node (e.g., kafka1.example.com to kafka6.example.com). Use these in configurations for advertised listeners.
+- Java 17+ installed on each node (Kafka requires it).
+- Download and extract the latest Apache Kafka binary (e.g., kafka_2.13-3.8.0.tgz) on each node from https://kafka.apache.org/downloads. Extract to /opt/kafka or similar, and create a kafka user/group for running the service.
+- For simplicity, assume nodes are kafka1 to kafka6, with IPs resolvable via DNS or /etc/hosts.
+
+All commands are run as the kafka user unless specified. Adapt paths as needed (e.g., KAFKA_HOME=/opt/kafka).
+
+### Step 1: Generate SSL Certificates for Encryption
+SSL provides encryption for client-broker and inter-broker communication. Use self-signed certificates for testing; in production, use CA-signed ones.
+
+1. On one node (e.g., kafka1), create a directory for certs (e.g., $KAFKA_HOME/certs).
+2. Generate a Certificate Authority (CA) key and cert:
+   ```
+   openssl req -new -newkey rsa:4096 -days 3650 -x509 -subj "/CN=Kafka-CA" -keyout ca-key -out ca-cert -nodes
+   ```
+3. Set a server password:
+   ```
+   export SRVPASS=serverpass  # Change this in production
+   ```
+4. For each broker (repeat for kafka1 to kafka6, replacing CN with hostname):
+   - Generate keystore:
+     ```
+     keytool -genkey -keystore kafka.keystore.jks -validity 3650 -storepass $SRVPASS -keypass $SRVPASS -dname "CN=kafka1.example.com" -storetype pkcs12
+     ```
+   - Create cert signing request:
+     ```
+     keytool -keystore kafka.keystore.jks -certreq -file cert-sign-request -storepass $SRVPASS -keypass $SRVPASS
+     ```
+   - Sign the request with CA:
+     ```
+     openssl x509 -req -CA ca-cert -CAkey ca-key -in cert-sign-request -out cert-signed -days 3650 -CAcreateserial
+     ```
+   - Import CA and signed cert into keystore:
+     ```
+     keytool -keystore kafka.keystore.jks -alias CARoot -import -file ca-cert -storepass $SRVPASS -keypass $SRVPASS -noprompt
+     keytool -keystore kafka.keystore.jks -import -file cert-signed -storepass $SRVPASS -keypass $SRVPASS -noprompt
+     ```
+   - Create truststore and import CA:
+     ```
+     keytool -keystore kafka.truststore.jks -alias CARoot -import -file ca-cert -storepass $SRVPASS -keypass $SRVPASS -noprompt
+     ```
+5. Copy the keystore, truststore, ca-cert, and ca-key to each node's $KAFKA_HOME/certs directory (customize filenames per node, e.g., kafka1.keystore.jks).
+6. For clients, generate a client truststore similarly:
+   ```
+   export CLIPASS=clientpass
+   keytool -keystore kafka.client.truststore.jks -alias CARoot -import -file ca-cert -storepass $CLIPASS -keypass $CLIPASS -noprompt
+   ```
+   Distribute this to any client machines.
+
+### Step 2: Configure SASL/SCRAM for Authentication
+SASL/SCRAM provides username/password authentication. We'll use SCRAM-SHA-512.
+
+1. On each broker, create a JAAS config file ($KAFKA_HOME/config/kraft/kafka_jaas.conf):
+   ```
+   KafkaServer {
+       org.apache.kafka.common.security.scram.ScramLoginModule required
+       username="admin"
+       password="admin-secret";  // This is for inter-broker auth; change passwords
+   };
+   Client {
+       org.apache.kafka.common.security.scram.ScramLoginModule required
+       username="admin"
+       password="admin-secret";
+   };
+   ```
+2. When starting brokers, set the environment variable:
+   ```
+   export KAFKA_OPTS="-Djava.security.auth.login.config=$KAFKA_HOME/config/kraft/kafka_jaas.conf"
+   ```
+   (Add this to your systemd service file if using services.)
+
+### Step 3: Configure Broker Properties for KRaft, SASL_SSL, and ACLs
+Edit $KAFKA_HOME/config/kraft/server.properties on each node. Key differences per node: node.id, listeners/advertised.listeners (use hostname).
+
+Common properties for all nodes:
+```
+process.roles=broker,controller  # Combined mode for small clusters
+controller.quorum.voters=1@kafka1.example.com:9093,2@kafka2.example.com:9093,3@kafka3.example.com:9093,4@kafka4.example.com:9093,5@kafka5.example.com:9093,6@kafka6.example.com:9093
+log.dirs=/tmp/kraft-combined-logs  # Or a persistent directory
+num.network.threads=3
+num.io.threads=8
+socket.send.buffer.bytes=102400
+socket.receive.buffer.bytes=102400
+socket.request.max.bytes=104857600
+num.partitions=6  # Default partitions; multiple of node count
+offsets.topic.replication.factor=3  # For internal topics; min 3 for HA
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+
+# Security: SASL_SSL for clients and inter-broker
+listeners=CONTROLLER://:9093,INTERNAL://:9094,EXTERNAL://:9092
+advertised.listeners=INTERNAL://kafka1.example.com:9094,EXTERNAL://kafka1.example.com:9092  # Customize per node
+listener.security.protocol.map=CONTROLLER:SASL_SSL,INTERNAL:SASL_SSL,EXTERNAL:SASL_SSL
+inter.broker.listener.name=INTERNAL
+sasl.enabled.mechanisms=SCRAM-SHA-512
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.mechanism.controller.protocol=SCRAM-SHA-512
+
+# SSL configs
+ssl.keystore.location=/path/to/kafka1.keystore.jks  # Customize per node
+ssl.keystore.password=serverpass
+ssl.key.password=serverpass
+ssl.truststore.location=/path/to/kafka.truststore.jks
+ssl.truststore.password=serverpass
+ssl.client.auth=required  # Mutual TLS for clients
+ssl.endpoint.identification.algorithm=  # Disable if using self-signed
+
+# ACLs for authorization
+authorizer.class.name=kafka.security.authorizer.AclAuthorizer
+allow.everyone.if.no.acl.found=false
+super.users=User:admin  # Admin has full access
+```
+- For node-specific: Set `node.id=1` for kafka1, up to `node.id=6` for kafka6. Update advertised.listeners with the node's hostname.
+- Use separate listeners: EXTERNAL for clients (SASL_SSL), INTERNAL for inter-broker (SASL_SSL), CONTROLLER for KRaft quorum (SASL_SSL).
+
+### Step 4: Format Storage and Start the Cluster
+1. On kafka1, generate a cluster UUID:
+   ```
+   KAFKA_CLUSTER_ID=$($KAFKA_HOME/bin/kafka-storage.sh random-uuid)
+   echo $KAFKA_CLUSTER_ID  # Note this value
+   ```
+2. On each node, format storage (after stopping any running Kafka and deleting old logs in log.dirs):
+   ```
+   $KAFKA_HOME/bin/kafka-storage.sh format -t $KAFKA_CLUSTER_ID -c config/kraft/server.properties
+   ```
+3. Start brokers (use systemd for production):
+   ```
+   export KAFKA_OPTS="-Djava.security.auth.login.config=$KAFKA_HOME/config/kraft/kafka_jaas.conf"
+   $KAFKA_HOME/bin/kafka-server-start.sh config/kraft/server.properties
+   ```
+4. Verify quorum:
+   ```
+   $KAFKA_HOME/bin/kafka-metadata-quorum.sh --bootstrap-server kafka1.example.com:9092 describe --status
+   ```
+   Ensure all 6 nodes are active.
+
+### Step 5: Create Users and Set ACLs
+Users are created in the cluster metadata (no ZooKeeper).
+
+1. Create admin and devops users (run from any node, using admin credentials in client config):
+   - Create a client config file (e.g., admin-client.properties):
+     ```
+     bootstrap.servers=kafka1.example.com:9092
+     security.protocol=SASL_SSL
+     sasl.mechanism=SCRAM-SHA-512
+     sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="admin-secret";
+     ssl.truststore.location=/path/to/kafka.client.truststore.jks
+     ssl.truststore.password=clientpass
+     ```
+   - Create admin user:
+     ```
+     $KAFKA_HOME/bin/kafka-configs.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --alter --add-config 'SCRAM-SHA-512=[password=admin-secret]' --entity-type users --entity-name admin
+     ```
+   - Create devops user:
+     ```
+     $KAFKA_HOME/bin/kafka-configs.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --alter --add-config 'SCRAM-SHA-512=[password=devops-secret]' --entity-type users --entity-name devops
+     ```
+
+2. Set ACLs (using admin-client.properties):
+   - Admin already has full access via super.users.
+   - For devops (read access: READ/DESCRIBE on all topics, clusters, groups):
+     ```
+     $KAFKA_HOME/bin/kafka-acls.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --add --allow-principal User:devops --operation Read --operation Describe --topic '*'
+     $KAFKA_HOME/bin/kafka-acls.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --add --allow-principal User:devops --operation Describe --cluster
+     $KAFKA_HOME/bin/kafka-acls.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --add --allow-principal User:devops --operation Read --operation Describe --group '*'
+     $KAFKA_HOME/bin/kafka-acls.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --add --allow-principal User:devops --consumer --topic '*' --group '*'
+     ```
+   - This grants read-only access: consume from any topic/group, describe resources, but no write/create/alter.
+
+3. Verify ACLs:
+   ```
+   $KAFKA_HOME/bin/kafka-acls.sh --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties --list
+   ```
+
+### Step 6: Client Configuration and Testing
+For clients (producers/consumers), create a config file (e.g., devops-client.properties):
+```
+bootstrap.servers=kafka1.example.com:9092,kafka2.example.com:9092  # Add more for HA
+security.protocol=SASL_SSL
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="devops" password="devops-secret";
+ssl.truststore.location=/path/to/kafka.client.truststore.jks
+ssl.truststore.password=clientpass
+```
+
+Test:
+- Create topic (as admin): `$KAFKA_HOME/bin/kafka-topics.sh --create --topic test --partitions 6 --replication-factor 3 --bootstrap-server kafka1.example.com:9092 --command-config admin-client.properties`
+- Produce (as admin): Use kafka-console-producer.sh with admin-client.properties.
+- Consume (as devops): Use kafka-console-consumer.sh with devops-client.properties – should work for read, fail for write.
+
+In production, monitor logs, use mutual TLS for stronger security, and rotate passwords/certificates regularly.
