@@ -491,3 +491,1163 @@ This configuration provides enterprise-grade security with:
 
 
 https://claude.ai/public/artifacts/694409f6-a4b4-47b0-8d4b-d96666e054af
+
+
+
+
+
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kafka 3.9 Upgrade Presentation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .presentation-container {
+            width: 100%;
+            max-width: 1200px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .slide {
+            display: none;
+            min-height: 600px;
+            padding: 60px;
+            background: white;
+        }
+
+        .slide.active {
+            display: block;
+            animation: fadeIn 0.5s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .slide-title {
+            font-size: 42px;
+            color: #2c3e50;
+            margin-bottom: 30px;
+            border-bottom: 4px solid #667eea;
+            padding-bottom: 15px;
+        }
+
+        .slide-subtitle {
+            font-size: 28px;
+            color: #667eea;
+            margin-bottom: 25px;
+            font-weight: 600;
+        }
+
+        .content-box {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 12px;
+            margin: 20px 0;
+            border-left: 5px solid #667eea;
+        }
+
+        .two-column {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin: 25px 0;
+        }
+
+        .column {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 12px;
+        }
+
+        .column h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 24px;
+        }
+
+        .bullet-list {
+            list-style: none;
+            padding-left: 0;
+        }
+
+        .bullet-list li {
+            padding: 12px 0;
+            padding-left: 30px;
+            position: relative;
+            font-size: 18px;
+            line-height: 1.6;
+            color: #2c3e50;
+        }
+
+        .bullet-list li:before {
+            content: "▶";
+            position: absolute;
+            left: 0;
+            color: #667eea;
+            font-size: 14px;
+        }
+
+        .highlight {
+            background: #fff3cd;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            margin: 5px;
+        }
+
+        .badge.red {
+            background: #dc3545;
+        }
+
+        .badge.green {
+            background: #28a745;
+        }
+
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 25px 60px;
+            background: #2c3e50;
+            color: white;
+        }
+
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .slide-counter {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .title-slide {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .title-slide .slide-title {
+            color: white;
+            border-bottom: 4px solid white;
+            font-size: 56px;
+        }
+
+        .title-slide .subtitle {
+            font-size: 28px;
+            margin-top: 20px;
+            opacity: 0.95;
+        }
+
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+
+        .comparison-table th,
+        .comparison-table td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 2px solid #dee2e6;
+        }
+
+        .comparison-table th {
+            background: #667eea;
+            color: white;
+            font-size: 18px;
+        }
+
+        .comparison-table tr:hover {
+            background: #f8f9fa;
+        }
+
+        .step-box {
+            background: white;
+            border: 3px solid #667eea;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 15px 0;
+        }
+
+        .step-number {
+            background: #667eea;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 20px;
+            margin-right: 15px;
+        }
+
+        .code-block {
+            background: #2c3e50;
+            color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin: 15px 0;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="presentation-container">
+        <!-- Slide 1: Title -->
+        <div class="slide active title-slide">
+            <h1 class="slide-title">Apache Kafka 3.9 Upgrade</h1>
+            <p class="subtitle">Migrating from Zookeeper to KRaft Mode</p>
+            <p class="subtitle" style="font-size: 22px; margin-top: 30px;">SASL/SSL Security & ACL Management</p>
+        </div>
+
+        <!-- Slide 2: Overview -->
+        <div class="slide">
+            <h1 class="slide-title">Upgrade Overview</h1>
+            <div class="content-box">
+                <h2 class="slide-subtitle">What's Changing?</h2>
+                <ul class="bullet-list">
+                    <li>Removing <span class="highlight">Apache Zookeeper</span> dependency</li>
+                    <li>Implementing <span class="highlight">KRaft (Kafka Raft)</span> consensus protocol</li>
+                    <li>Simplifying architecture and improving performance</li>
+                    <li>Enhanced scalability and faster metadata operations</li>
+                </ul>
+            </div>
+            <div class="two-column">
+                <div class="column">
+                    <h3>Kafka 3.9 Benefits</h3>
+                    <ul class="bullet-list">
+                        <li>Up to 10x faster startup</li>
+                        <li>Support for millions of partitions</li>
+                        <li>Faster controller failover</li>
+                        <li>Simplified operations</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>Timeline</h3>
+                    <span class="badge red">Zookeeper Deprecated</span>
+                    <span class="badge green">KRaft GA in 3.9</span>
+                    <ul class="bullet-list">
+                        <li>Production-ready</li>
+                        <li>Full feature parity</li>
+                        <li>Long-term support</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 3: Architecture Comparison -->
+        <div class="slide">
+            <h1 class="slide-title">Architecture Comparison</h1>
+            <div class="two-column">
+                <div class="column">
+                    <h3>🏛️ Legacy: Kafka + Zookeeper</h3>
+                    <ul class="bullet-list">
+                        <li>Separate Zookeeper cluster required</li>
+                        <li>Two systems to manage and monitor</li>
+                        <li>Metadata stored in Zookeeper</li>
+                        <li>Complex operational overhead</li>
+                        <li>Limited partition scalability</li>
+                        <li>Slower metadata updates</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>⚡ Modern: Kafka with KRaft</h3>
+                    <ul class="bullet-list">
+                        <li>Self-contained Kafka cluster</li>
+                        <li>Single system to manage</li>
+                        <li>Metadata in Kafka topics</li>
+                        <li>Simplified operations</li>
+                        <li>Millions of partitions supported</li>
+                        <li>Lightning-fast metadata operations</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="content-box" style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">Key Architectural Change</h3>
+                <p style="font-size: 18px; line-height: 1.8;">KRaft mode uses a <strong>Raft-based quorum controller</strong> within Kafka brokers themselves, eliminating the external Zookeeper dependency. Dedicated controller nodes manage metadata, while broker nodes handle data operations.</p>
+            </div>
+        </div>
+
+        <!-- Slide 4: Migration Strategy -->
+        <div class="slide">
+            <h1 class="slide-title">Migration Strategy</h1>
+            <h2 class="slide-subtitle">Two Approaches Available</h2>
+            
+            <div class="step-box">
+                <span class="step-number">1</span>
+                <strong style="font-size: 20px;">Fresh KRaft Cluster (Recommended for New Deployments)</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Deploy new Kafka 3.9 cluster in KRaft mode</li>
+                    <li>Use MirrorMaker 2 for data migration</li>
+                    <li>Switch clients to new cluster</li>
+                    <li>Cleanest approach with minimal risk</li>
+                </ul>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 20px;">In-Place Migration (For Existing Clusters)</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Upgrade to Kafka 3.9 in Zookeeper mode first</li>
+                    <li>Run migration tool to transfer metadata</li>
+                    <li>Switch to KRaft mode with rolling restart</li>
+                    <li>Requires careful planning and testing</li>
+                </ul>
+            </div>
+
+            <div class="content-box" style="background: #fff3cd; margin-top: 20px;">
+                <strong style="color: #856404;">⚠️ Important:</strong> Always test migration in non-production environment first. Ensure full backups before beginning migration process.
+            </div>
+        </div>
+
+        <!-- Slide 5: Pre-Migration Checklist -->
+        <div class="slide">
+            <h1 class="slide-title">Pre-Migration Checklist</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>✅ Preparation Steps</h3>
+                    <ul class="bullet-list">
+                        <li>Audit current Kafka version</li>
+                        <li>Document all configurations</li>
+                        <li>Review security settings (SASL/SSL)</li>
+                        <li>Export ACLs and user permissions</li>
+                        <li>Backup Zookeeper data</li>
+                        <li>Test client compatibility</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>🔍 Validation Required</h3>
+                    <ul class="bullet-list">
+                        <li>All brokers at compatible version</li>
+                        <li>No deprecated features in use</li>
+                        <li>Sufficient disk space available</li>
+                        <li>Network connectivity verified</li>
+                        <li>Monitoring systems ready</li>
+                        <li>Rollback plan documented</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">Critical Configuration Items</h3>
+                <table class="comparison-table">
+                    <tr>
+                        <th>Component</th>
+                        <th>Action Required</th>
+                    </tr>
+                    <tr>
+                        <td><strong>ACLs</strong></td>
+                        <td>Export and verify all access control lists</td>
+                    </tr>
+                    <tr>
+                        <td><strong>SASL/SSL</strong></td>
+                        <td>Validate certificates and credential stores</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Topics</strong></td>
+                        <td>Document retention policies and configurations</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <!-- Slide 6: SASL/SSL Configuration -->
+        <div class="slide">
+            <h1 class="slide-title">SASL/SSL Security Configuration</h1>
+            <h2 class="slide-subtitle">Authentication & Encryption in KRaft Mode</h2>
+            
+            <div class="content-box">
+                <h3 style="color: #667eea; margin-bottom: 15px;">Supported SASL Mechanisms</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <span class="badge green">SASL/PLAIN</span>
+                    <span class="badge green">SASL/SCRAM-SHA-256</span>
+                    <span class="badge green">SASL/SCRAM-SHA-512</span>
+                    <span class="badge green">SASL/GSSAPI (Kerberos)</span>
+                    <span class="badge green">SASL/OAUTHBEARER</span>
+                </div>
+            </div>
+
+            <div class="two-column" style="margin-top: 30px;">
+                <div class="column">
+                    <h3>🔐 SSL/TLS Configuration</h3>
+                    <ul class="bullet-list">
+                        <li>Mutual TLS authentication</li>
+                        <li>Certificate-based validation</li>
+                        <li>Encrypted data in transit</li>
+                        <li>Broker-to-broker encryption</li>
+                        <li>Client-to-broker encryption</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>🎫 SASL Configuration</h3>
+                    <ul class="bullet-list">
+                        <li>User authentication layer</li>
+                        <li>Password/credential-based</li>
+                        <li>SCRAM recommended for KRaft</li>
+                        <li>Stored in metadata topic</li>
+                        <li>No Zookeeper dependency</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 25px; background: #d4edda;">
+                <strong style="color: #155724;">✓ KRaft Advantage:</strong> SCRAM credentials are now stored in Kafka's internal metadata log instead of Zookeeper, providing better performance and consistency.
+            </div>
+        </div>
+
+        <!-- Slide 7: SASL/SSL Implementation -->
+        <div class="slide">
+            <h1 class="slide-title">SASL/SSL Implementation Details</h1>
+            
+            <div class="step-box">
+                <span class="step-number">1</span>
+                <strong style="font-size: 18px;">Controller Configuration (KRaft Nodes)</strong>
+                <div class="code-block">
+# Controller listener configuration
+controller.listener.names=CONTROLLER
+listeners=CONTROLLER://0.0.0.0:9093
+inter.broker.listener.name=CONTROLLER
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 18px;">Broker Security Configuration</strong>
+                <div class="code-block">
+# SSL Configuration
+ssl.keystore.location=/var/private/ssl/kafka.server.keystore.jks
+ssl.keystore.password=your-keystore-password
+ssl.key.password=your-key-password
+ssl.truststore.location=/var/private/ssl/kafka.server.truststore.jks
+ssl.truststore.password=your-truststore-password
+
+# SASL Configuration
+sasl.enabled.mechanisms=SCRAM-SHA-512
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+security.inter.broker.protocol=SASL_SSL
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">3</span>
+                <strong style="font-size: 18px;">Listener Configuration</strong>
+                <div class="code-block">
+listeners=BROKER://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+advertised.listeners=BROKER://your-hostname:9092
+listener.security.protocol.map=CONTROLLER:SASL_SSL,BROKER:SASL_SSL
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 8: ACL Overview -->
+        <div class="slide">
+            <h1 class="slide-title">Access Control Lists (ACLs)</h1>
+            <h2 class="slide-subtitle">Authorization in KRaft Mode</h2>
+            
+            <div class="content-box">
+                <h3 style="color: #667eea; margin-bottom: 15px;">What Are ACLs?</h3>
+                <p style="font-size: 18px; line-height: 1.8;">ACLs define <strong>who can perform what operations</strong> on which Kafka resources. They provide fine-grained authorization control for topics, consumer groups, clusters, and transactional IDs.</p>
+            </div>
+
+            <div class="two-column" style="margin-top: 25px;">
+                <div class="column">
+                    <h3>📋 Resource Types</h3>
+                    <ul class="bullet-list">
+                        <li><strong>Topic:</strong> Individual topics</li>
+                        <li><strong>Group:</strong> Consumer groups</li>
+                        <li><strong>Cluster:</strong> Cluster operations</li>
+                        <li><strong>TransactionalId:</strong> Transactions</li>
+                        <li><strong>DelegationToken:</strong> Token auth</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>⚙️ Operation Types</h3>
+                    <ul class="bullet-list">
+                        <li><strong>Read:</strong> Consume messages</li>
+                        <li><strong>Write:</strong> Produce messages</li>
+                        <li><strong>Create:</strong> Create resources</li>
+                        <li><strong>Delete:</strong> Delete resources</li>
+                        <li><strong>Alter:</strong> Modify configs</li>
+                        <li><strong>Describe:</strong> View metadata</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 25px; background: #d1ecf1;">
+                <strong style="color: #0c5460;">ℹ️ KRaft Change:</strong> ACLs are now stored in the <strong>__cluster_metadata</strong> topic instead of Zookeeper. This provides faster ACL lookups and better consistency across the cluster.
+            </div>
+        </div>
+
+        <!-- Slide 9: ACL Migration -->
+        <div class="slide">
+            <h1 class="slide-title">ACL Migration Process</h1>
+            
+            <div class="step-box">
+                <span class="step-number">1</span>
+                <strong style="font-size: 18px;">Export ACLs from Zookeeper Mode</strong>
+                <div class="code-block">
+# Export all ACLs to a file
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --list > acls-backup.txt
+
+# Or export in importable format
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --list --all
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 18px;">Automatic ACL Transfer During Migration</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Kafka migration tool automatically transfers ACLs</li>
+                    <li>ACLs copied from Zookeeper to __cluster_metadata topic</li>
+                    <li>Preserved during in-place migration process</li>
+                    <li>Verify after migration completes</li>
+                </ul>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">3</span>
+                <strong style="font-size: 18px;">Verify ACLs in KRaft Mode</strong>
+                <div class="code-block">
+# List all ACLs in new KRaft cluster
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --list
+
+# Check specific topic ACLs
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --topic your-topic-name --list
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 10: ACL Use Cases -->
+        <div class="slide">
+            <h1 class="slide-title">Common ACL Use Cases</h1>
+            
+            <div class="step-box">
+                <span class="step-number">1</span>
+                <strong style="font-size: 18px;">Producer Access to Specific Topic</strong>
+                <div class="code-block">
+# Allow user 'producer-app' to write to 'orders' topic
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add --allow-principal User:producer-app \
+  --operation Write --topic orders
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 18px;">Consumer Group Access</strong>
+                <div class="code-block">
+# Allow consumer group to read from topic
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add --allow-principal User:consumer-app \
+  --operation Read --topic orders \
+  --operation Read --group consumer-group-1
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">3</span>
+                <strong style="font-size: 18px;">Admin User with Full Access</strong>
+                <div class="code-block">
+# Grant all operations on all topics
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --command-config admin.properties \
+  --add --allow-principal User:admin \
+  --operation All --topic '*' \
+  --resource-pattern-type literal
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 11: Advanced ACL Scenarios -->
+        <div class="slide">
+            <h1 class="slide-title">Advanced ACL Scenarios</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>🎯 Prefix-Based ACLs</h3>
+                    <div class="code-block" style="font-size: 12px;">
+# All topics starting with 'prod-'
+kafka-acls.sh \
+  --bootstrap-server localhost:9092 \
+  --add \
+  --allow-principal User:app \
+  --operation Read \
+  --topic prod- \
+  --resource-pattern-type prefixed
+                    </div>
+                    <p style="margin-top: 10px; font-size: 14px;">Useful for organizing topics by environment or team</p>
+                </div>
+                <div class="column">
+                    <h3>🚫 Deny Rules</h3>
+                    <div class="code-block" style="font-size: 12px;">
+# Deny access to sensitive topic
+kafka-acls.sh \
+  --bootstrap-server localhost:9092 \
+  --add \
+  --deny-principal User:untrusted \
+  --operation Read \
+  --topic sensitive-data
+                    </div>
+                    <p style="margin-top: 10px; font-size: 14px;">Deny rules take precedence over allow rules</p>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">🏢 Multi-Tenant Use Case</h3>
+                <div class="code-block">
+# Team A: Read/Write to their topics only
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --add --allow-principal User:team-a \
+  --operation Read --operation Write \
+  --topic team-a- --resource-pattern-type prefixed
+
+# Team B: Read/Write to their topics only
+kafka-acls.sh --bootstrap-server localhost:9092 \
+  --add --allow-principal User:team-b \
+  --operation Read --operation Write \
+  --topic team-b- --resource-pattern-type prefixed
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 12: Security Best Practices -->
+        <div class="slide">
+            <h1 class="slide-title">Security Best Practices</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>🔒 SASL/SSL Best Practices</h3>
+                    <ul class="bullet-list">
+                        <li>Use SCRAM-SHA-512 for authentication</li>
+                        <li>Enable SSL for all inter-broker communication</li>
+                        <li>Use separate keystores for each broker</li>
+                        <li>Rotate certificates regularly</li>
+                        <li>Store passwords in encrypted configs</li>
+                        <li>Use strong TLS protocols (TLS 1.2+)</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>✅ ACL Best Practices</h3>
+                    <ul class="bullet-list">
+                        <li>Follow principle of least privilege</li>
+                        <li>Use prefix patterns for organization</li>
+                        <li>Document all ACL rules</li>
+                        <li>Regular ACL audits and reviews</li>
+                        <li>Separate service accounts per application</li>
+                        <li>Test ACLs in non-prod first</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 30px; background: #fff3cd;">
+                <h3 style="color: #856404; margin-bottom: 15px;">⚠️ Common Pitfalls to Avoid</h3>
+                <ul class="bullet-list">
+                    <li>Using wildcard ACLs (*) for production clusters</li>
+                    <li>Forgetting to grant consumer group permissions</li>
+                    <li>Not testing ACLs after migration</li>
+                    <li>Weak SASL mechanisms in production</li>
+                    <li>Expired SSL certificates causing outages</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Slide 13: Post-Migration Validation -->
+        <div class="slide">
+            <h1 class="slide-title">Post-Migration Validation</h1>
+            
+            <div class="step-box">
+                <span class="step-number">1</span>
+                <strong style="font-size: 18px;">Verify Cluster Health</strong>
+                <div class="code-block">
+# Check cluster metadata
+kafka-metadata.sh --snapshot /var/lib/kafka/metadata/__cluster_metadata-0/*.snapshot
+
+# Verify controller quorum
+kafka-metadata-quorum.sh --bootstrap-server localhost:9092 describe --status
+                </div>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 18px;">Validate Security Configuration</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Test SASL authentication with all user accounts</li>
+                    <li>Verify SSL certificates are valid and trusted</li>
+                    <li>Confirm all ACLs migrated correctly</li>
+                    <li>Test producer and consumer access</li>
+                    <li>Validate inter-broker communication</li>
+                </ul>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">3</span>
+                <strong style="font-size: 18px;">Performance Testing</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Run producer/consumer throughput tests</li>
+                    <li>Monitor metadata operation latency</li>
+                    <li>Verify partition leader election speed</li>
+                    <li>Test application failover scenarios</li>
+                    <li>Compare metrics against baseline</li>
+                </ul>
+            </div>
+
+            <div class="content-box" style="margin-top: 20px; background: #d4edda;">
+                <strong style="color: #155724;">✓ Success Criteria:</strong> All clients can authenticate, ACLs enforce expected permissions, no error logs related to security, and performance meets or exceeds pre-migration baselines.
+            </div>
+        </div>
+
+        <!-- Slide 14: Monitoring & Troubleshooting -->
+        <div class="slide">
+            <h1 class="slide-title">Monitoring & Troubleshooting</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>📊 Key Metrics to Monitor</h3>
+                    <ul class="bullet-list">
+                        <li><strong>ActiveControllerCount:</strong> Should be 1</li>
+                        <li><strong>OfflinePartitionsCount:</strong> Should be 0</li>
+                        <li><strong>UnderReplicatedPartitions:</strong> Monitor closely</li>
+                        <li><strong>MetadataErrorCount:</strong> Watch for spikes</li>
+                        <li><strong>RequestQueueSize:</strong> Should be stable</li>
+                        <li><strong>AuthenticationFailures:</strong> Security issues</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>🔍 Common Issues</h3>
+                    <ul class="bullet-list">
+                        <li><strong>Authentication failures:</strong> Check JAAS config</li>
+                        <li><strong>SSL handshake errors:</strong> Verify certificates</li>
+                        <li><strong>ACL denials:</strong> Review permissions</li>
+                        <li><strong>Controller election:</strong> Check quorum health</li>
+                        <li><strong>Metadata lag:</strong> Network or disk issues</li>
+                        <li><strong>Connection refused:</strong> Listener config</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 25px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">🛠️ Troubleshooting Commands</h3>
+                <div class="code-block">
+# View controller logs
+tail -f /var/log/kafka/controller.log | grep ERROR
+
+# Check ACL denials
+grep "AUTHORIZATION_FAILED" /var/log/kafka/server.log
+
+# Verify SSL configuration
+openssl s_client -connect localhost:9092 -tls1_2
+
+# Test SASL authentication
+kafka-console-producer.sh --bootstrap-server localhost:9092 \
+  --producer.config client-ssl.properties --topic test
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 15: Rollback Strategy -->
+        <div class="slide">
+            <h1 class="slide-title">Rollback Strategy</h1>
+            <h2 class="slide-subtitle">Prepare for the Unexpected</h2>
+            
+            <div class="content-box" style="background: #f8d7da;">
+                <h3 style="color: #721c24; margin-bottom: 15px;">⚠️ Important: Plan Your Rollback</h3>
+                <p style="font-size: 18px; line-height: 1.8;">Migration from Zookeeper to KRaft is a <strong>one-way process</strong>. Once committed, you cannot rollback to Zookeeper mode. A rollback requires restoring from backups or deploying a new cluster.</p>
+            </div>
+
+            <div class="step-box" style="margin-top: 30px;">
+                <span class="step-number">1</span>
+                <strong style="font-size: 18px;">Before Migration Starts</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Complete backup of all Kafka data and Zookeeper snapshots</li>
+                    <li>Document current cluster state and configurations</li>
+                    <li>Have standby cluster ready if possible</li>
+                    <li>Export all topics, ACLs, and configurations</li>
+                </ul>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">2</span>
+                <strong style="font-size: 18px;">If Issues Occur During Migration</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Stop migration process immediately</li>
+                    <li>Preserve metadata state for analysis</li>
+                    <li>Restore from pre-migration backups if needed</li>
+                    <li>Use MirrorMaker 2 to redirect traffic to backup cluster</li>
+                </ul>
+            </div>
+
+            <div class="step-box">
+                <span class="step-number">3</span>
+                <strong style="font-size: 18px;">Recovery Time Objectives</strong>
+                <ul class="bullet-list" style="margin-top: 15px;">
+                    <li>Define acceptable downtime window</li>
+                    <li>Test backup restoration procedures</li>
+                    <li>Have runbooks ready for common scenarios</li>
+                    <li>Ensure team availability during migration window</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Slide 16: Migration Timeline -->
+        <div class="slide">
+            <h1 class="slide-title">Recommended Migration Timeline</h1>
+            
+            <table class="comparison-table">
+                <tr>
+                    <th>Phase</th>
+                    <th>Duration</th>
+                    <th>Key Activities</th>
+                </tr>
+                <tr>
+                    <td><strong>Planning</strong></td>
+                    <td>2-4 weeks</td>
+                    <td>Assess current state, design target architecture, create detailed plan</td>
+                </tr>
+                <tr>
+                    <td><strong>Testing</strong></td>
+                    <td>2-3 weeks</td>
+                    <td>Set up test environment, perform migration dry runs, validate security</td>
+                </tr>
+                <tr>
+                    <td><strong>Dev Migration</strong></td>
+                    <td>1 week</td>
+                    <td>Migrate development environment, gather lessons learned</td>
+                </tr>
+                <tr>
+                    <td><strong>Staging Migration</strong></td>
+                    <td>1 week</td>
+                    <td>Migrate staging, full end-to-end testing, performance validation</td>
+                </tr>
+                <tr>
+                    <td><strong>Production Prep</strong></td>
+                    <td>1-2 weeks</td>
+                    <td>Final runbook review, communication plan, rollback preparation</td>
+                </tr>
+                <tr>
+                    <td><strong>Production Migration</strong></td>
+                    <td>1-2 days</td>
+                    <td>Execute migration, validate functionality, monitor closely</td>
+                </tr>
+                <tr>
+                    <td><strong>Post-Migration</strong></td>
+                    <td>2 weeks</td>
+                    <td>Enhanced monitoring, optimization, documentation updates</td>
+                </tr>
+            </table>
+
+            <div class="content-box" style="margin-top: 30px;">
+                <strong>Total Timeline:</strong> Approximately <span class="highlight">8-12 weeks</span> for a complete, safe migration to KRaft mode with proper testing and validation.
+            </div>
+        </div>
+
+        <!-- Slide 17: Client Considerations -->
+        <div class="slide">
+            <h1 class="slide-title">Client Application Considerations</h1>
+            
+            <div class="content-box">
+                <h3 style="color: #667eea; margin-bottom: 15px;">Good News: Client Compatibility</h3>
+                <p style="font-size: 18px; line-height: 1.8;">The KRaft migration is <strong>transparent to client applications</strong>. Clients interact with Kafka using the same APIs and protocols. No client code changes required!</p>
+            </div>
+
+            <div class="two-column" style="margin-top: 25px;">
+                <div class="column">
+                    <h3>✅ What Stays the Same</h3>
+                    <ul class="bullet-list">
+                        <li>Producer and Consumer APIs unchanged</li>
+                        <li>Bootstrap server connection method</li>
+                        <li>SASL/SSL authentication process</li>
+                        <li>ACL enforcement behavior</li>
+                        <li>Topic and partition concepts</li>
+                        <li>Message format and protocols</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>⚡ What Improves</h3>
+                    <ul class="bullet-list">
+                        <li>Faster metadata propagation</li>
+                        <li>Quicker partition leader elections</li>
+                        <li>Reduced latency for admin operations</li>
+                        <li>Better consistency guarantees</li>
+                        <li>Improved cluster stability</li>
+                        <li>Faster cluster recovery</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 25px; background: #d1ecf1;">
+                <strong style="color: #0c5460;">📝 Action Items:</strong> Update documentation, inform teams about migration schedule, test client connectivity in pre-production, and verify SASL/SSL configurations remain valid.
+            </div>
+        </div>
+
+        <!-- Slide 18: Cost-Benefit Analysis -->
+        <div class="slide">
+            <h1 class="slide-title">Cost-Benefit Analysis</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>💰 Migration Costs</h3>
+                    <ul class="bullet-list">
+                        <li>Planning and preparation time</li>
+                        <li>Testing infrastructure</li>
+                        <li>Potential downtime window</li>
+                        <li>Team training and ramp-up</li>
+                        <li>Risk of migration issues</li>
+                        <li>Documentation updates</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>📈 Long-term Benefits</h3>
+                    <ul class="bullet-list">
+                        <li>30-40% reduction in operational overhead</li>
+                        <li>10x faster cluster startup</li>
+                        <li>Support for millions of partitions</li>
+                        <li>Simplified architecture</li>
+                        <li>Better performance and scalability</li>
+                        <li>Future-proof infrastructure</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">💡 ROI Considerations</h3>
+                <ul class="bullet-list">
+                    <li><strong>Reduced Infrastructure:</strong> No separate Zookeeper cluster means fewer servers to maintain</li>
+                    <li><strong>Operational Efficiency:</strong> Single system monitoring and management</li>
+                    <li><strong>Performance Gains:</strong> Faster operations reduce waiting time and improve throughput</li>
+                    <li><strong>Scalability:</strong> Ability to handle exponentially more partitions enables growth</li>
+                    <li><strong>Support Lifecycle:</strong> Zookeeper mode will eventually be deprecated</li>
+                </ul>
+            </div>
+
+            <div class="content-box" style="margin-top: 20px; background: #d4edda;">
+                <strong style="color: #155724;">Recommendation:</strong> For most organizations, the long-term benefits significantly outweigh the one-time migration costs. Plan migration within the next 12-18 months.
+            </div>
+        </div>
+
+        <!-- Slide 19: Resources & Support -->
+        <div class="slide">
+            <h1 class="slide-title">Resources & Support</h1>
+            
+            <div class="two-column">
+                <div class="column">
+                    <h3>📚 Documentation</h3>
+                    <ul class="bullet-list">
+                        <li><strong>Apache Kafka Docs:</strong><br>kafka.apache.org/documentation</li>
+                        <li><strong>KRaft Migration Guide:</strong><br>Detailed step-by-step instructions</li>
+                        <li><strong>Security Configuration:</strong><br>SASL/SSL setup guides</li>
+                        <li><strong>ACL Management:</strong><br>Authorization documentation</li>
+                    </ul>
+                </div>
+                <div class="column">
+                    <h3>🛠️ Tools & Utilities</h3>
+                    <ul class="bullet-list">
+                        <li><strong>kafka-storage.sh:</strong> Format metadata</li>
+                        <li><strong>kafka-metadata.sh:</strong> Inspect snapshots</li>
+                        <li><strong>kafka-acls.sh:</strong> Manage ACLs</li>
+                        <li><strong>kafka-configs.sh:</strong> Configuration management</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">🎯 Pre-Migration Checklist</h3>
+                <div class="two-column">
+                    <div>
+                        <ul class="bullet-list">
+                            <li>✓ Backup all data and configs</li>
+                            <li>✓ Export ACLs and user credentials</li>
+                            <li>✓ Document security configurations</li>
+                            <li>✓ Test in non-production environment</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <ul class="bullet-list">
+                            <li>✓ Prepare monitoring dashboards</li>
+                            <li>✓ Create rollback procedures</li>
+                            <li>✓ Schedule maintenance window</li>
+                            <li>✓ Communicate with stakeholders</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <div class="content-box" style="margin-top: 20px; background: #fff3cd;">
+                <strong style="color: #856404;">💬 Community Support:</strong> Kafka mailing lists, Slack channels, and Stack Overflow are excellent resources for troubleshooting and best practices.
+            </div>
+        </div>
+
+        <!-- Slide 20: Summary -->
+        <div class="slide title-slide">
+            <h1 class="slide-title" style="font-size: 48px;">Summary: Key Takeaways</h1>
+            <div style="text-align: left; max-width: 900px; margin: 0 auto;">
+                <div style="background: rgba(255,255,255,0.15); padding: 25px; border-radius: 12px; margin: 20px 0;">
+                    <h3 style="color: white; font-size: 24px; margin-bottom: 15px;">✨ KRaft Advantages</h3>
+                    <ul class="bullet-list" style="color: white; font-size: 18px;">
+                        <li>Simplified architecture - no Zookeeper dependency</li>
+                        <li>10x faster startup and metadata operations</li>
+                        <li>Support for millions of partitions</li>
+                        <li>Better performance and scalability</li>
+                    </ul>
+                </div>
+                
+                <div style="background: rgba(255,255,255,0.15); padding: 25px; border-radius: 12px; margin: 20px 0;">
+                    <h3 style="color: white; font-size: 24px; margin-bottom: 15px;">🔐 Security Continuity</h3>
+                    <ul class="bullet-list" style="color: white; font-size: 18px;">
+                        <li>SASL/SSL configurations fully supported</li>
+                        <li>ACLs automatically migrated to metadata topic</li>
+                        <li>No changes to authentication mechanisms</li>
+                        <li>Enhanced performance for security operations</li>
+                    </ul>
+                </div>
+                
+                <div style="background: rgba(255,255,255,0.15); padding: 25px; border-radius: 12px; margin: 20px 0;">
+                    <h3 style="color: white; font-size: 24px; margin-bottom: 15px;">🎯 Next Steps</h3>
+                    <ul class="bullet-list" style="color: white; font-size: 18px;">
+                        <li>Test migration in development environment</li>
+                        <li>Plan detailed migration schedule</li>
+                        <li>Validate security configurations</li>
+                        <li>Execute phased production rollout</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- Slide 21: Q&A -->
+        <div class="slide title-slide">
+            <h1 class="slide-title" style="font-size: 64px;">Questions?</h1>
+            <div style="margin-top: 50px;">
+                <p style="font-size: 24px; margin: 20px 0;">Thank you for your attention!</p>
+                <p style="font-size: 20px; opacity: 0.9; margin-top: 40px;">📧 Contact your Kafka team for migration support</p>
+                <p style="font-size: 20px; opacity: 0.9;">📖 Documentation: kafka.apache.org</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+        <button class="btn" id="prevBtn" onclick="changeSlide(-1)">← Previous</button>
+        <span class="slide-counter">
+            <span id="currentSlide">1</span> / <span id="totalSlides">21</span>
+        </span>
+        <button class="btn" id="nextBtn" onclick="changeSlide(1)">Next →</button>
+    </div>
+
+    <script>
+        let currentSlide = 1;
+        const totalSlides = document.querySelectorAll('.slide').length;
+        
+        document.getElementById('totalSlides').textContent = totalSlides;
+        
+        function showSlide(n) {
+            const slides = document.querySelectorAll('.slide');
+            
+            if (n > totalSlides) {
+                currentSlide = totalSlides;
+            }
+            if (n < 1) {
+                currentSlide = 1;
+            }
+            
+            slides.forEach(slide => slide.classList.remove('active'));
+            slides[currentSlide - 1].classList.add('active');
+            
+            document.getElementById('currentSlide').textContent = currentSlide;
+            
+            document.getElementById('prevBtn').disabled = currentSlide === 1;
+            document.getElementById('nextBtn').disabled = currentSlide === totalSlides;
+        }
+        
+        function changeSlide(direction) {
+            currentSlide += direction;
+            showSlide(currentSlide);
+        }
+        
+        // Keyboard navigation
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'ArrowLeft') {
+                changeSlide(-1);
+            } else if (e.key === 'ArrowRight') {
+                changeSlide(1);
+            }
+        });
+        
+        // Initialize
+        showSlide(currentSlide);
+    </script>
+</body>
+</html>
