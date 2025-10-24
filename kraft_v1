@@ -1,0 +1,249 @@
+To fully replace your Ansible playbook with Terraform for provisioning and configuring a 12-node Kafka cluster (all nodes as clients, 3ros, 3 as controllers) on AWS EC2 instances, we need to address both provisioning and configuration using only Terraform. Since Terraform is designed for provisioning infrastructure and not for detailed server configuration (e.g., installing Kafka from S3 or updating `server.properties`), we’ll use Terraform’s capabilities to:
+
+1. **Provision** 12 EC2 instances with appropriate tags for client and controller roles.
+2. **Configure** Kafka by:
+   - Using Terraform’s `user_data` script to install Kafka from an S3 bucket and set up client/controller configurations during instance boot.
+   - Generating Kafka configuration files dynamically using Terraform templates.
+
+This approach avoids Ansible entirely, relying on Terraform’s `aws_instance` resource and `user_data` scripts for both provisioning and configuration. Below is a complete Terraform solution tailored to your setup.
+
+---
+
+### Assumptions
+- **Kafka Cluster**: 12 EC2 instances (`apphost01` to `apphost12`), all running Kafka brokers (clients), with `apphost01–03` also acting as controllers (KRaft mode, no ZooKeeper).
+- **S3 Bucket**: Contains the Kafka binary (e.g., `kafka_3.6.0.tgz`).
+- **OS**: Ubuntu 20.04 (adjustable via AMI ID).
+- **Configuration**: Kafka’s `server.properties` will be generated dynamically for client vs. controller roles.
+
+If your setup differs (e.g., specific Kafka version, different OS, or ZooKeeper-based), please clarify, and I can adjust the configuration.
+
+---
+
+### Terraform Configuration (`main.tf`)
+
+This configuration:
+- Provisions 12 EC2 instances with appropriate security groups.
+- Uses `user_data` to install Kafka from S3 and configure it.
+- Generates `server.properties` dynamically for each node’s role (broker or broker+controller).
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1" # Adjust as needed
+}
+
+# Variables
+variable "ami_id" {
+  default = "ami-0c55b159cbf677470" # Ubuntu 20.04 AMI (us-east-1, update as needed)
+}
+
+variable "instance_type" {
+  default = "t3.medium" # Adjust based on Kafka requirements
+}
+
+variable "s3_bucket" {
+  default = "your-kafka-bucket" # Replace with your S3 bucket name
+}
+
+variable "kafka_version" {
+  default = "3.6.0" # Adjust as needed
+}
+
+# Security Group
+resource "aws_security_group" "kafka_sg" {
+  name        = "kafka-security-group"
+  description = "Allow Kafka and SSH traffic"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Restrict to your IP in production
+  }
+
+  ingress {
+    from_port   = 9092
+    to_port     = 9092
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Adjust for Kafka client access
+  }
+
+  ingress {
+    from_port   = 9093
+    to_port     = 9093
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # For KRaft controller communication
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Kafka Instances
+resource "aws_instance" "kafka_nodes" {
+  count         = 12
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.kafka_sg.name]
+
+  # User data script to install and configure Kafka
+  user_data = templatefile("${path.module}/kafka_setup.sh.tftpl", {
+    node_id         = count.index + 1
+    is_controller   = count.index < 3
+    controller_ips  = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+    s3_bucket       = var.s3_bucket
+    kafka_version   = var.kafka_version
+    node_ip         = aws_instance.kafka_nodes[count.index].public_ip
+  })
+
+  tags = {
+    Name = "apphost${format("%02d", count.index + 1)}"
+    Role = count.index < 3 ? "controller" : "client"
+  }
+}
+
+# Output for reference
+output "kafka_node_ips" {
+  value = aws_instance.kafka_nodes[*].public_ip
+}
+
+output "controller_ips" {
+  value = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+}
+```
+
+---
+
+### Kafka Setup Script Template (`kafka_setup.sh.tftpl`)
+
+This script is rendered by Terraform for each instance via `user_data`, installing Kafka from S3 and configuring it based on the node’s role (broker or broker+controller).
+
+```bash
+#!/bin/bash
+set -e
+
+# Install dependencies
+apt-get update
+apt-get install -y openjdk-11-jdk unzip awscli
+
+# Download Kafka from S3
+aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/kafka_${kafka_version}.tgz
+
+# Extract Kafka
+tar -xzf /tmp/kafka_${kafka_version}.tgz -C /opt
+ln -s /opt/kafka_${kafka_version} /opt/kafka
+
+# Create Kafka configuration
+cat << EOF > /opt/kafka/config/kraft/server.properties
+node.id=${node_id}
+process.roles=${is_controller ? "controller,broker" : "broker"}
+controller.quorum.voters=${join(",", [for ip in controller_ips : "${ip}:9093"])}
+listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+advertised.listeners=PLAINTEXT://${node_ip}:9092
+num.partitions=3
+default.replication.factor=3
+EOF
+
+# Create systemd service for Kafka
+cat << EOF > /etc/systemd/system/kafka.service
+[Unit]
+Description=Apache Kafka Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/server.properties
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Start Kafka
+systemctl daemon-reload
+systemctl enable kafka
+systemctl start kafka
+```
+
+---
+
+### How It Works
+1. **Provisioning**:
+   - Terraform creates 12 EC2 instances (`apphost01–12`) with the specified AMI and instance type.
+   - Instances are tagged (`Role: controller` for `apphost01–03`, `Role: client` for others).
+   - A security group allows SSH (port 22), Kafka client traffic (port 9092), and KRaft controller traffic (port 9093).
+
+2. **Configuration**:
+   - The `user_data` script runs on each instance at boot, using variables passed from Terraform (`node_id`, `is_controller`, `controller_ips`, etc.).
+   - The script:
+     - Installs dependencies (`openjdk-11-jdk`, `awscli`, `unzip`).
+     - Downloads Kafka from your S3 bucket.
+     - Extracts it to `/opt/kafka`.
+     - Generates `server.properties` with node-specific settings (e.g., `node.id`, `process.roles`, and controller quorum).
+     - Sets up Kafka as a `systemd` service and starts it.
+
+3. **Kafka Configuration**:
+   - Each node gets a unique `node.id` (1–12).
+   - Nodes `apphost01–03` are configured as `controller,broker` (KRaft controllers + brokers).
+   - Nodes `apphost04–12` are brokers only.
+   - The `controller.quorum.voters` is populated with the public IPs of `apphost01–03` on port 9093.
+
+---
+
+### Steps to Apply
+1. **Prepare**:
+   - Replace placeholders in `main.tf`:
+     - `ami_id`: Use the correct AMI for your region/OS (e.g., Ubuntu 20.04).
+     - `s3_bucket`: Your S3 bucket name.
+     - `kafka_version`: Your Kafka version (e.g., `3.6.0`).
+   - Ensure your AWS credentials are configured (`~/.aws/credentials` or environment variables).
+   - Ensure the Kafka tarball exists in S3 (e.g., `s3://your-kafka-bucket/kafka_3.6.0.tgz`).
+   - Save the `kafka_setup.sh.tftpl` script in the same directory as `main.tf`.
+
+2. **Run Terraform**:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+3. **Verify**:
+   - Check instance status: `terraform output kafka_node_ips`.
+   - SSH into a node (e.g., `ssh -i ~/.ssh/id_rsa ubuntu@<node_ip>`) and verify:
+     - Kafka is running: `systemctl status kafka`.
+     - Configuration: `cat /opt/kafka/config/kraft/server.properties`.
+   - Test Kafka cluster connectivity (e.g., create a topic using `kafka-topics.sh`).
+
+---
+
+### Notes and Best Practices
+- **Security**:
+  - Restrict the security group’s `cidr_blocks` (e.g., to your VPN’s IP range) for ports 22, 9092, and 9093 in production.
+  - Store sensitive data (e.g., AWS credentials, SSH keys) in AWS Secrets Manager or Terraform variables.
+- **Scalability**:
+  - Use Terraform modules for reusability if managing multiple clusters.
+  - Consider AWS Auto Scaling Groups for dynamic scaling (requires additional configuration).
+- **Idempotency**:
+  - Terraform ensures infrastructure is provisioned idempotently via its state file.
+  - The `user_data` script is run only on instance creation, but the `systemd` service ensures Kafka restarts on reboot.
+- **Limitations**:
+  - Terraform’s `user_data` is less flexible than Ansible for complex configuration. If you need advanced Kafka tuning (e.g., log retention, custom JVM options), extend the `kafka_setup.sh.tftpl` script.
+  - If instances already exist, import them using `terraform import aws_instance.kafka_nodes[<index>] <instance_id>`.
+- **Monitoring**:
+  - Add AWS CloudWatch metrics or a monitoring tool (e.g., Prometheus) via additional Terraform resources if needed.
+- **Kafka Version**:
+  - The setup assumes KRaft mode (Kafka 3.x+). For ZooKeeper-based Kafka, modify `server.properties` to include `zookeeper.connect` and provision ZooKeeper nodes separately.
+
+If you share specific details (e.g., Kafka version, existing instance IDs, or additional configuration needs), I can refine the scripts further. Let me know if you want to generate a diagram of this setup or test specific Kafka commands post-deployment!
