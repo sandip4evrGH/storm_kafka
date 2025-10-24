@@ -1,0 +1,762 @@
+To fully replace your Ansible setup for a 12-node Kafka 3.9 cluster with JAAS configuration and MirrorMaker using only Terraform, and to address your request to use Terraform template files for `mirrormaker.properties`, `server.properties` (for brokers), and a separate `controller.properties` (for KRaft controllers) instead of generating them inline in the `user_data` script, we’ll extend the previous solution. This involves:
+
+1. **Provisioning**: 12 AWS EC2 instances (`apphost01–12`), all as brokers, with `apphost01–03` also as controllers.
+2. **Kafka Installation**: Install Kafka 3.9 from an S3 bucket.
+3. **JAAS Configuration**: Set up `kafka_jaas.conf` for SASL/PLAIN authentication.
+4. **Configuration Files**: Use Terraform `templatefile` to render:
+   - `server.properties` for brokers (all 12 nodes).
+   - `controller.properties` for KRaft controllers (`apphost01–03`).
+   - `mirrormaker.properties` for MirrorMaker 2.0 (all nodes, adjustable if needed).
+5. **MirrorMaker**: Configure replication between source and destination clusters.
+
+### Assumptions
+- **Kafka 3.9**: KRaft mode (no ZooKeeper), with SASL/PLAIN for security.
+- **JAAS**: Uses `admin` and `mirrormaker` users (configurable via variables).
+- **MirrorMaker**: Runs on all 12 nodes, replicating between a source and destination cluster (modify if specific nodes or topics are needed).
+- **S3**: Contains `kafka_3.9.0.tgz`.
+- **OS**: Ubuntu 20.04 (adjustable via AMI).
+- **Templates**: Generic templates for `server.properties`, `controller.properties`, and `mirrormaker.properties` rendered by Terraform.
+
+If you have specific JAAS settings (e.g., Kerberos), MirrorMaker requirements, or existing instance IDs, please share them for a more tailored solution.
+
+---
+
+### Terraform Configuration (`main.tf`)
+
+This provisions 12 EC2 instances, installs Kafka, and uses template files for configuration.
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1" # Adjust as needed
+}
+
+# Variables
+variable "ami_id" {
+  default = "ami-0c55b159cbf677470" # Ubuntu 20.04 AMI (us-east-1, update as needed)
+}
+
+variable "instance_type" {
+  default = "t3.medium" # Adjust for Kafka requirements
+}
+
+variable "s3_bucket" {
+  default = "your-kafka-bucket" # Replace with your S3 bucket name
+}
+
+variable "kafka_version" {
+  default = "3.9.0" # Kafka version
+}
+
+variable "sasl_users" {
+  default = {
+    admin       = "admin-secret"
+    mirrormaker = "mirrormaker-secret"
+  }
+}
+
+variable "source_cluster" {
+  default = "source-cluster:9092" # Replace with source cluster bootstrap servers
+}
+
+variable "dest_cluster" {
+  default = "dest-cluster:9092" # Replace with destination cluster
+}
+
+# Security Group
+resource "aws_security_group" "kafka_sg" {
+  name        = "kafka-security-group"
+  description = "Allow Kafka, MirrorMaker, and SSH traffic"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Restrict to your IP in production
+  }
+
+  ingress {
+    from_port   = 9092
+    to_port     = 9092
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Kafka SASL/PLAIN
+  }
+
+  ingress {
+    from_port   = 9093
+    to_port     = 9093
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # KRaft controller
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Render JAAS configuration
+data "template_file" "kafka_jaas" {
+  template = file("${path.module}/kafka_jaas.conf.tftpl")
+  vars = {
+    admin_username = keys(var.sasl_users)[0]
+    admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    mm_username    = keys(var.sasl_users)[1]
+    mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+  }
+}
+
+# Kafka Instances
+resource "aws_instance" "kafka_nodes" {
+  count         = 12
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.kafka_sg.name]
+
+  # User data script
+  user_data = templatefile("${path.module}/kafka_setup.sh.tftpl", {
+    node_id          = count.index + 1
+    is_controller    = count.index < 3
+    controller_ips   = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+    s3_bucket        = var.s3_bucket
+    kafka_version    = var.kafka_version
+    node_ip          = aws_instance.kafka_nodes[count.index].public_ip
+    jaas_config      = data.template_file.kafka_jaas.rendered
+    broker_config    = templatefile("${path.module}/server.properties.tftpl", {
+      node_id        = count.index + 1
+      node_ip        = aws_instance.kafka_nodes[count.index].public_ip
+      controller_ips = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+      admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    })
+    controller_config = templatefile("${path.module}/controller.properties.tftpl", {
+      node_id        = count.index + 1
+      node_ip        = aws_instance.kafka_nodes[count.index].public_ip
+      controller_ips = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+      admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    })
+    mirrormaker_config = templatefile("${path.module}/mirrormaker.properties.tftpl", {
+      source_cluster = var.source_cluster
+      dest_cluster   = var.dest_cluster
+      mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+    })
+  })
+
+  tags = {
+    Name = "apphost${format("%02d", count.index + 1)}"
+    Role = count.index < 3 ? "controller" : "client"
+  }
+}
+
+# Outputs
+output "kafka_node_ips" {
+  value = aws_instance.kafka_nodes[*].public_ip
+}
+
+output "controller_ips" {
+  value = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+}
+```
+
+---
+
+### Template Files
+
+#### 1. JAAS Configuration (`kafka_jaas.conf.tftpl`)
+```conf
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="${admin_username}"
+  password="${admin_password}"
+  user_${admin_username}="${admin_password}"
+  user_${mm_username}="${mm_password}";
+};
+```
+
+#### 2. Broker Configuration (`server.properties.tftpl`)
+For all 12 nodes (brokers).
+```properties
+node.id=${node_id}
+process.roles=broker
+controller.quorum.voters=${join(",", [for ip in controller_ips : "${ip}:9093"])}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092
+advertised.listeners=SASL_PLAINTEXT://${node_ip}:9092
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+#### 3. Controller Configuration (`controller.properties.tftpl`)
+For `apphost01–03` (controllers).
+```properties
+node.id=${node_id}
+process.roles=controller,broker
+controller.quorum.voters=${join(",", [for ip in controller_ips : "${ip}:9093"])}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+advertised.listeners=SASL_PLAINTEXT://${node_ip}:9092
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+#### 4. MirrorMaker Configuration (`mirrormaker.properties.tftpl`)
+For all nodes (adjust if MirrorMaker runs on specific nodes).
+```properties
+clusters=source,destination
+source.bootstrap.servers=${source_cluster}
+destination.bootstrap.servers=${dest_cluster}
+source->destination.enabled=true
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="mirrormaker" password="${mm_password}";
+replication.factor=3
+tasks.max=10
+```
+
+#### 5. Setup Script (`kafka_setup.sh.tftpl`)
+Installs Kafka and applies templated configurations.
+```bash
+#!/bin/bash
+set -e
+
+# Install dependencies
+apt-get update
+apt-get install -y openjdk-11-jdk unzip awscli
+
+# Download Kafka from S3
+aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/kafka_${kafka_version}.tgz
+
+# Extract Kafka
+tar -xzf /tmp/kafka_${kafka_version}.tgz -C /opt
+ln -s /opt/kafka_${kafka_version} /opt/kafka
+
+# Write JAAS configuration
+cat << 'EOF' > /opt/kafka/config/kraft/kafka_jaas.conf
+${jaas_config}
+EOF
+
+# Write configuration files
+cat << 'EOF' > /opt/kafka/config/kraft/server.properties
+${broker_config}
+EOF
+
+${is_controller ? "cat << 'EOF' > /opt/kafka/config/kraft/controller.properties\n${controller_config}\nEOF" : ""}
+
+cat << 'EOF' > /opt/kafka/config/mirrormaker.properties
+${mirrormaker_config}
+EOF
+
+# Create systemd service for Kafka
+cat << EOF > /etc/systemd/system/kafka.service
+[Unit]
+Description=Apache Kafka Server
+After=network.target
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kraft/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/${is_controller ? "controller.properties" : "server.properties"}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create systemd service for MirrorMaker
+cat << EOF > /etc/systemd/system/mirrormaker.service
+[Unit]
+Description=Kafka MirrorMaker 2.0
+After=network.target kafka.service
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kraft/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/connect-mirror-maker.sh /opt/kafka/config/mirrormaker.properties
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Start services
+systemctl daemon-reload
+systemctl enable kafka
+systemctl start kafka
+systemctl enable mirrormaker
+systemctl start mirrormaker
+```
+
+---
+
+### How It Works
+1. **Provisioning**:
+   - Creates 12 EC2 instances (`apphost01–12`) with tags (`Role: controller` for `apphost01–03`, `client` for others).
+   - Security group allows SSH (22), Kafka (9092), and KRaft (9093).
+
+2. **Configuration**:
+   - **JAAS**: `kafka_jaas.conf.tftpl` generates SASL/PLAIN credentials.
+   - **Broker**: `server.properties.tftpl` configures all 12 nodes as brokers.
+   - **Controller**: `controller.properties.tftpl` configures `apphost01–03` as controllers (written only for those nodes).
+   - **MirrorMaker**: `mirrormaker.properties.tftpl` sets up replication.
+   - The `kafka_setup.sh.tftpl` script installs Kafka, writes templated configs, and starts services.
+
+3. **Logic**:
+   - `user_data` uses `is_controller` to conditionally write `controller.properties` and select the correct Kafka config file.
+   - All nodes run MirrorMaker (modify script if specific nodes are needed).
+
+---
+
+### Steps to Apply
+1. **Prepare**:
+   - Create template files (`kafka_jaas.conf.tftpl`, `server.properties.tftpl`, `controller.properties.tftpl`, `mirrormaker.properties.tftpl`, `kafka_setup.sh.tftpl`) in the same directory as `main.tf`.
+   - Update `main.tf`:
+     - `ami_id`: Correct AMI for your region.
+     - `s3_bucket`: Your S3 bucket name.
+     - `source_cluster`, `dest_cluster`: Bootstrap servers for MirrorMaker.
+     - `sasl_users`: Add users/passwords as needed.
+   - Ensure `kafka_3.9.0.tgz` exists in S3.
+   - Configure AWS credentials.
+
+2. **Run Terraform**:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+3. **Verify**:
+   - Check IPs: `terraform output kafka_node_ips`.
+   - SSH into a node (`ssh -i ~/.ssh/id_rsa ubuntu@<node_ip>`):
+     - Verify services: `systemctl status kafka`, `systemctl status mirrormaker`.
+     - Check configs: `cat /opt/kafka/config/kraft/{server.properties,controller.properties,kafka_jaas.conf,mirrormaker.properties}`.
+   - Test Kafka and replication (e.g., `kafka-topics.sh --bootstrap-server <node_ip>:9092 --command-config <sasl_config> --list`).
+
+---
+
+### Notes and Best Practices
+- **Security**:
+  - Restrict `kafka_sg` ingress in production.
+  - Store `sasl_users` passwords in AWS Secrets Manager.
+  - Use SASL/SSL for encryption.
+- **MirrorMaker**:
+  - Customize `mirrormaker.properties.tftpl` for specific topics (e.g., `source->destination.topics=.*`).
+  - If MirrorMaker runs on specific nodes, add a condition in `kafka_setup.sh.tftpl`.
+- **Existing Infrastructure**:
+  - Import instances: `terraform import aws_instance.kafka_nodes[<index>] <instance_id>`.
+  - Use `terraformer` for bulk import.
+- **Limitations**:
+  - `user_data` runs once; updates require instance replacement.
+  - Complex configs may be harder to manage than with Ansible.
+- **Monitoring**:
+  - Add CloudWatch or Prometheus via Terraform.
+
+If you share your Ansible playbook or specific JAAS/MirrorMaker details, I can further customize the templates. Let me know if you want a cluster diagram or help with testing!
+
+
+
+
+
+
+******************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************
+***********************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************
+******************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************************
+To further organize the Terraform configuration for your 12-node Kafka 3.9 cluster (all nodes as brokers, `apphost01–03` as controllers, with JAAS and MirrorMaker 2.0), we’ll move the template files (`kafka_jaas.conf.tftpl`, `server.properties.tftpl`, `controller.properties.tftpl`, `mirrormaker.properties.tftpl`, `kafka_setup.sh.tftpl`) to a separate folder (e.g., `templates/`). Variables will remain in a separate `variables.tf` file, and the main configuration will stay in `main.tf`. This setup provisions 12 EC2 instances, installs Kafka 3.9 from S3, configures JAAS for SASL/PLAIN, and sets up MirrorMaker using Terraform-rendered configuration files.
+
+### Assumptions
+- **Kafka 3.9**: KRaft mode (no ZooKeeper), SASL/PLAIN for security.
+- **JAAS**: Uses `admin` and `mirrormaker` users (configurable via variables).
+- **MirrorMaker**: Runs on all 12 nodes, replicating between source and destination clusters (adjust if needed).
+- **S3**: Contains `kafka_3.9.0.tgz`.
+- **OS**: Ubuntu 20.04 (adjustable via AMI).
+- **Templates**: Generic configs for `server.properties` (brokers), `controller.properties` (controllers), and `mirrormaker.properties`, stored in a `templates/` folder.
+
+If you have specific JAAS settings, MirrorMaker requirements, or existing instance IDs, please share for further customization.
+
+---
+
+### Directory Structure
+```
+kafka-terraform/
+├── main.tf
+├── variables.tf
+├── templates/
+│   ├── kafka_jaas.conf.tftpl
+│   ├── server.properties.tftpl
+│   ├── controller.properties.tftpl
+│   ├── mirrormaker.properties.tftpl
+│   ├── kafka_setup.sh.tftpl
+```
+
+---
+
+### Variables File (`variables.tf`)
+
+Defines all configurable parameters.
+
+```hcl
+variable "ami_id" {
+  description = "AMI ID for EC2 instances (e.g., Ubuntu 20.04)"
+  type        = string
+  default     = "ami-0c55b159cbf677470" # Update for your region
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.medium" # Adjust for Kafka requirements
+}
+
+variable "s3_bucket" {
+  description = "S3 bucket containing Kafka binary"
+  type        = string
+  default     = "your-kafka-bucket" # Replace with your bucket
+}
+
+variable "kafka_version" {
+  description = "Kafka version to install"
+  type        = string
+  default     = "3.9.0"
+}
+
+variable "sasl_users" {
+  description = "SASL/PLAIN users and passwords"
+  type        = map(string)
+  default = {
+    admin       = "admin-secret"
+    mirrormaker = "mirrormaker-secret"
+  }
+}
+
+variable "source_cluster" {
+  description = "Source cluster bootstrap servers for MirrorMaker"
+  type        = string
+  default     = "source-cluster:9092" # Replace with actual servers
+}
+
+variable "dest_cluster" {
+  description = "Destination cluster bootstrap servers for MirrorMaker"
+  type        = string
+  default     = "dest-cluster:9092" # Replace with actual servers
+}
+
+variable "aws_region" {
+  description = "AWS region for resources"
+  type        = string
+  default     = "us-east-1"
+}
+```
+
+---
+
+### Main Configuration (`main.tf`)
+
+Provisions resources and references templates in the `templates/` folder.
+
+```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Security Group
+resource "aws_security_group" "kafka_sg" {
+  name        = "kafka-security-group"
+  description = "Allow Kafka, MirrorMaker, and SSH traffic"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Restrict to your IP in production
+  }
+
+  ingress {
+    from_port   = 9092
+    to_port     = 9092
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Kafka SASL/PLAIN
+  }
+
+  ingress {
+    from_port   = 9093
+    to_port     = 9093
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # KRaft controller
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Render JAAS configuration
+data "template_file" "kafka_jaas" {
+  template = file("${path.module}/templates/kafka_jaas.conf.tftpl")
+  vars = {
+    admin_username = keys(var.sasl_users)[0]
+    admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    mm_username    = keys(var.sasl_users)[1]
+    mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+  }
+}
+
+# Kafka Instances
+resource "aws_instance" "kafka_nodes" {
+  count         = 12
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  security_groups = [aws_security_group.kafka_sg.name]
+
+  # User data script
+  user_data = templatefile("${path.module}/templates/kafka_setup.sh.tftpl", {
+    node_id          = count.index + 1
+    is_controller    = count.index < 3
+    controller_ips   = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+    s3_bucket        = var.s3_bucket
+    kafka_version    = var.kafka_version
+    node_ip          = aws_instance.kafka_nodes[count.index].public_ip
+    jaas_config      = data.template_file.kafka_jaas.rendered
+    broker_config    = templatefile("${path.module}/templates/server.properties.tftpl", {
+      node_id        = count.index + 1
+      node_ip        = aws_instance.kafka_nodes[count.index].public_ip
+      controller_ips = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+      admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    })
+    controller_config = templatefile("${path.module}/templates/controller.properties.tftpl", {
+      node_id        = count.index + 1
+      node_ip        = aws_instance.kafka_nodes[count.index].public_ip
+      controller_ips = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+      admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    })
+    mirrormaker_config = templatefile("${path.module}/templates/mirrormaker.properties.tftpl", {
+      source_cluster = var.source_cluster
+      dest_cluster   = var.dest_cluster
+      mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+    })
+  })
+
+  tags = {
+    Name = "apphost${format("%02d", count.index + 1)}"
+    Role = count.index < 3 ? "controller" : "client"
+  }
+}
+
+# Outputs
+output "kafka_node_ips" {
+  value = aws_instance.kafka_nodes[*].public_ip
+}
+
+output "controller_ips" {
+  value = slice(aws_instance.kafka_nodes[*].public_ip, 0, 3)
+}
+```
+
+---
+
+### Template Files (in `templates/`)
+
+#### 1. JAAS Configuration (`templates/kafka_jaas.conf.tftpl`)
+```conf
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="${admin_username}"
+  password="${admin_password}"
+  user_${admin_username}="${admin_password}"
+  user_${mm_username}="${mm_password}";
+};
+```
+
+#### 2. Broker Configuration (`templates/server.properties.tftpl`)
+For all 12 nodes (brokers).
+```properties
+node.id=${node_id}
+process.roles=broker
+controller.quorum.voters=${join(",", [for ip in controller_ips : "${ip}:9093"])}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092
+advertised.listeners=SASL_PLAINTEXT://${node_ip}:9092
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+#### 3. Controller Configuration (`templates/controller.properties.tftpl`)
+For `apphost01–03` (controllers).
+```properties
+node.id=${node_id}
+process.roles=controller,broker
+controller.quorum.voters=${join(",", [for ip in controller_ips : "${ip}:9093"])}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+advertised.listeners=SASL_PLAINTEXT://${node_ip}:9092
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+#### 4. MirrorMaker Configuration (`templates/mirrormaker.properties.tftpl`)
+For all nodes (adjust if specific nodes).
+```properties
+clusters=source,destination
+source.bootstrap.servers=${source_cluster}
+destination.bootstrap.servers=${dest_cluster}
+source->destination.enabled=true
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="mirrormaker" password="${mm_password}";
+replication.factor=3
+tasks.max=10
+```
+
+#### 5. Setup Script (`templates/kafka_setup.sh.tftpl`)
+Installs Kafka and applies templated configs.
+```bash
+#!/bin/bash
+set -e
+
+# Install dependencies
+apt-get update
+apt-get install -y openjdk-11-jdk unzip awscli
+
+# Download Kafka from S3
+aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/kafka_${kafka_version}.tgz
+
+# Extract Kafka
+tar -xzf /tmp/kafka_${kafka_version}.tgz -C /opt
+ln -s /opt/kafka_${kafka_version} /opt/kafka
+
+# Write JAAS configuration
+cat << 'EOF' > /opt/kafka/config/kraft/kafka_jaas.conf
+${jaas_config}
+EOF
+
+# Write configuration files
+cat << 'EOF' > /opt/kafka/config/kraft/server.properties
+${broker_config}
+EOF
+
+${is_controller ? "cat << 'EOF' > /opt/kafka/config/kraft/controller.properties\n${controller_config}\nEOF" : ""}
+
+cat << 'EOF' > /opt/kafka/config/mirrormaker.properties
+${mirrormaker_config}
+EOF
+
+# Create systemd service for Kafka
+cat << EOF > /etc/systemd/system/kafka.service
+[Unit]
+Description=Apache Kafka Server
+After=network.target
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kraft/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/${is_controller ? "controller.properties" : "server.properties"}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create systemd service for MirrorMaker
+cat << EOF > /etc/systemd/system/mirrormaker.service
+[Unit]
+Description=Kafka MirrorMaker 2.0
+After=network.target kafka.service
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kraft/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/connect-mirror-maker.sh /opt/kafka/config/mirrormaker.properties
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Start services
+systemctl daemon-reload
+systemctl enable kafka
+systemctl start kafka
+systemctl enable mirrormaker
+systemctl start mirrormaker
+```
+
+---
+
+### Steps to Apply
+1. **Prepare**:
+   - Create the directory structure and save all files as shown.
+   - Update `variables.tf`:
+     - `ami_id`: Correct AMI for your region.
+     - `s3_bucket`: Your S3 bucket name.
+     - `source_cluster`, `dest_cluster`: MirrorMaker bootstrap servers.
+     - `sasl_users`: Add users/passwords as needed.
+   - Ensure `kafka_3.9.0.tgz` exists in S3.
+   - Configure AWS credentials (`~/.aws/credentials` or environment variables).
+
+2. **Run Terraform**:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+3. **Verify**:
+   - Check IPs: `terraform output kafka_node_ips`.
+   - SSH into a node (`ssh -i ~/.ssh/id_rsa ubuntu@<node_ip>`):
+     - Verify services: `systemctl status kafka`, `systemctl status mirrormaker`.
+     - Check configs: `cat /opt/kafka/config/kraft/{server.properties,controller.properties,kafka_jaas.conf,mirrormaker.properties}`.
+   - Test Kafka and replication (e.g., `kafka-topics.sh --bootstrap-server <node_ip>:9092 --command-config <sasl_config> --list`).
+
+---
+
+### Notes and Best Practices
+- **Security**:
+  - Restrict `kafka_sg` ingress to specific CIDR blocks in production.
+  - Store `sasl_users` passwords in AWS Secrets Manager and retrieve in `user_data` using `aws secretsmanager get-secret-value`.
+  - Consider SASL/SSL instead of SASL_PLAINTEXT for encryption.
+- **MirrorMaker**:
+  - Customize `mirrormaker.properties.tftpl` for specific topics (e.g., `source->destination.topics=.*`).
+  - If MirrorMaker runs on specific nodes, add a condition in `kafka_setup.sh.tftpl` (e.g., `if [ ${node_id} -le 3 ]; then ...`).
+- **Existing Infrastructure**:
+  - Import instances: `terraform import aws_instance.kafka_nodes[<index>] <instance_id>`.
+  - Use `terraformer`: `terraformer import aws --resources=ec2_instance --region=us-east-1`.
+- **Limitations**:
+  - `user_data` runs only on instance creation; updates require instance replacement or manual intervention.
+  - Complex configurations may be easier with a tool like Ansible, but this adheres to your no-Ansible requirement.
+- **Monitoring**:
+  - Add CloudWatch or Prometheus via Terraform for monitoring Kafka/MirrorMaker.
+- **Kafka 3.9**:
+  - Assumes KRaft mode. For ZooKeeper, modify templates to include `zookeeper.connect` and provision ZooKeeper nodes.
+
+If you share your Ansible playbook, specific JAAS settings (e.g., Kerberos), or MirrorMaker details (e.g., topic patterns), I can refine the templates further. Let me know if you want a diagram of the cluster or assistance with testing replication!
