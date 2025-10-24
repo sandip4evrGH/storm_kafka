@@ -1,0 +1,1231 @@
+To make the Terraform configuration for your Kafka 3.9 setup more modular while maintaining the existing functionality (12-node Kafka clusters for Dev, QA, Staging, Prod, scaling to 50 clusters, 3-node MirrorMaker 2.0 clusters per environment for on-prem to cloud replication, private subnets, and NLBs), we’ll enhance modularity by:
+
+1. **Breaking Down Modules**: Split the `kafka_cluster` and `mm2_cluster` modules into smaller, reusable sub-modules (e.g., VPC, NLB, EC2) to reduce code duplication and improve maintainability.
+2. **Centralized Networking**: Create a shared `network` module for VPC, subnets, NAT Gateway, and route tables, used by both Kafka and MirrorMaker clusters.
+3. **Configuration Abstraction**: Use a generic `instance` module for EC2 provisioning, parameterized for Kafka or MM2 specifics (e.g., `user_data`, instance type).
+4. **Dynamic Configuration**: Parameterize templates further to reduce hardcoding and enable reuse across different cluster types.
+5. **Scaling Support**: Retain the ability to scale to 50 clusters via the `clusters` map, with environment-specific settings.
+
+This approach reduces code repetition, makes it easier to add new clusters or modify existing ones, and aligns with Terraform best practices for large-scale deployments. The setup remains in private subnets, uses NLBs for port exposure (9092, 9093), and supports MirrorMaker 2.0 (Kafka Connect) for on-prem to cloud replication.
+
+---
+
+## Directory Structure
+```
+kafka-terraform/
+├── main.tf
+├── variables.tf
+├── terraform.tfvars  # Optional for overrides
+├── templates/
+│   ├── kafka_jaas.conf.tftpl
+│   ├── server.properties.tftpl
+│   ├── controller.properties.tftpl
+│   ├── mm2_worker.properties.tftpl
+│   ├── kafka_setup.sh.tftpl
+│   ├── mm2_setup.sh.tftpl
+├── modules/
+│   ├── network/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   ├── nlb/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   ├── instance/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   ├── kafka_cluster/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   ├── mm2_cluster/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+```
+
+---
+
+## File Contents
+
+### main.tf
+Instantiates Kafka and MirrorMaker clusters, leveraging shared network and instance modules.
+```
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Instantiate Kafka clusters
+module "kafka_clusters" {
+  for_each = var.clusters
+  source   = "./modules/kafka_cluster"
+
+  cluster_name       = "kafka-cluster-${each.key}"
+  instance_type      = each.value.instance_type
+  ami_id             = each.value.ami_id
+  s3_bucket          = each.value.s3_bucket
+  kafka_version      = each.value.kafka_version
+  num_nodes          = each.value.num_nodes
+  num_controllers    = each.value.num_controllers
+  vpc_cidr           = each.value.vpc_cidr
+  subnet_cidrs       = each.value.subnet_cidrs
+  sasl_users         = each.value.sasl_users
+}
+
+# Instantiate MM2 clusters
+module "mm2_clusters" {
+  for_each = var.clusters
+  source   = "./modules/mm2_cluster"
+
+  cluster_name         = "mm2-cluster-${each.key}"
+  instance_type        = var.mm2_instance_type
+  ami_id               = each.value.ami_id
+  s3_bucket            = each.value.s3_bucket
+  kafka_version        = each.value.kafka_version
+  num_nodes            = var.mm2_num_nodes
+  vpc_id               = module.kafka_clusters[each.key].vpc_id
+  private_subnet_ids   = module.kafka_clusters[each.key].private_subnet_ids
+  source_bootstrap     = each.value.on_prem_bootstrap
+  dest_bootstrap       = module.kafka_clusters[each.key].nlb_dns
+  sasl_users           = each.value.sasl_users
+  on_prem_sasl_users   = each.value.on_prem_sasl_users
+}
+
+# Outputs
+output "cluster_ips" {
+  value = { for env, cluster in module.kafka_clusters : env => cluster.kafka_node_ips }
+}
+
+output "controller_ips" {
+  value = { for env, cluster in module.kafka_clusters : env => cluster.controller_ips }
+}
+
+output "mm2_node_ips" {
+  value = { for env, cluster in module.mm2_clusters : env => cluster.mm2_node_ips }
+}
+
+output "nlb_dns" {
+  value = { for env, cluster in module.kafka_clusters : env => cluster.nlb_dns }
+}
+```
+
+### variables.tf
+Defines environment-specific configurations and global settings.
+```
+variable "aws_region" {
+  description = "AWS region for resources"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "clusters" {
+  description = "Map of Kafka clusters with environment-specific configs"
+  type = map(object({
+    instance_type      = string
+    ami_id             = string
+    s3_bucket          = string
+    kafka_version      = string
+    num_nodes          = number
+    num_controllers    = number
+    vpc_cidr           = string
+    subnet_cidrs       = list(string)
+    source_cluster     = string
+    dest_cluster       = string
+    sasl_users         = map(string)
+    on_prem_bootstrap  = string
+    on_prem_sasl_users = map(string)
+  }))
+  default = {
+    dev = {
+      instance_type   = "t3.medium"
+      ami_id          = "ami-0c55b159cbf677470"
+      s3_bucket       = "your-kafka-bucket"
+      kafka_version   = "3.9.0"
+      num_nodes       = 12
+      num_controllers = 3
+      vpc_cidr        = "10.0.0.0/16"
+      subnet_cidrs    = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+      source_cluster  = ""
+      dest_cluster    = "kafka-cluster-qa:9092"
+      sasl_users = {
+        admin       = "admin-secret-dev"
+        mirrormaker = "mirrormaker-secret-dev"
+      }
+      on_prem_bootstrap  = "onprem-kafka1.example.com:9092,onprem-kafka2.example.com:9092"
+      on_prem_sasl_users = { admin = "onprem-admin-secret" }
+    },
+    qa = {
+      instance_type   = "m5.large"
+      ami_id          = "ami-0c55b159cbf677470"
+      s3_bucket       = "your-kafka-bucket"
+      kafka_version   = "3.9.0"
+      num_nodes       = 12
+      num_controllers = 3
+      vpc_cidr        = "10.1.0.0/16"
+      subnet_cidrs    = ["10.1.1.0/24", "10.1.2.0/24", "10.1.3.0/24"]
+      source_cluster  = "kafka-cluster-dev:9092"
+      dest_cluster    = "kafka-cluster-staging:9092"
+      sasl_users = {
+        admin       = "admin-secret-qa"
+        mirrormaker = "mirrormaker-secret-qa"
+      }
+      on_prem_bootstrap  = "onprem-kafka1.example.com:9092,onprem-kafka2.example.com:9092"
+      on_prem_sasl_users = { admin = "onprem-admin-secret" }
+    },
+    staging = {
+      instance_type   = "m5.xlarge"
+      ami_id          = "ami-0c55b159cbf677470"
+      s3_bucket       = "your-kafka-bucket"
+      kafka_version   = "3.9.0"
+      num_nodes       = 12
+      num_controllers = 3
+      vpc_cidr        = "10.2.0.0/16"
+      subnet_cidrs    = ["10.2.1.0/24", "10.2.2.0/24", "10.2.3.0/24"]
+      source_cluster  = "kafka-cluster-qa:9092"
+      dest_cluster    = "kafka-cluster-prod:9092"
+      sasl_users = {
+        admin       = "admin-secret-staging"
+        mirrormaker = "mirrormaker-secret-staging"
+      }
+      on_prem_bootstrap  = "onprem-kafka1.example.com:9092,onprem-kafka2.example.com:9092"
+      on_prem_sasl_users = { admin = "onprem-admin-secret" }
+    },
+    prod = {
+      instance_type   = "m5.2xlarge"
+      ami_id          = "ami-0c55b159cbf677470"
+      s3_bucket       = "your-kafka-bucket"
+      kafka_version   = "3.9.0"
+      num_nodes       = 12
+      num_controllers = 3
+      vpc_cidr        = "10.3.0.0/16"
+      subnet_cidrs    = ["10.3.1.0/24", "10.3.2.0/24", "10.3.3.0/24"]
+      source_cluster  = "kafka-cluster-staging:9092"
+      dest_cluster    = ""
+      sasl_users = {
+        admin       = "admin-secret-prod"
+        mirrormaker = "mirrormaker-secret-prod"
+      }
+      on_prem_bootstrap  = "onprem-kafka1.example.com:9092,onprem-kafka2.example.com:9092"
+      on_prem_sasl_users = { admin = "onprem-admin-secret" }
+    }
+  }
+}
+
+variable "mm2_num_nodes" {
+  description = "Number of MirrorMaker nodes per cluster"
+  type        = number
+  default     = 3
+}
+
+variable "mm2_instance_type" {
+  description = "Instance type for MirrorMaker nodes"
+  type        = string
+  default     = "t3.medium"
+}
+```
+
+### terraform.tfvars (Optional)
+```
+# Example overrides
+aws_region = "us-east-1"
+# clusters = { ... add cluster-5 to cluster-50 ... }
+```
+
+### templates/kafka_jaas.conf.tftpl
+```
+KafkaServer {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="${admin_username}"
+  password="${admin_password}"
+  user_${admin_username}="${admin_password}"
+  user_${mm_username}="${mm_password}";
+};
+```
+
+### templates/server.properties.tftpl
+```
+node.id=${node_id}
+process.roles=broker
+controller.quorum.voters=${controller_quorum}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092
+advertised.listeners=${advertised_listeners}
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+### templates/controller.properties.tftpl
+```
+node.id=${node_id}
+process.roles=controller,broker
+controller.quorum.voters=${controller_quorum}
+listeners=SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+advertised.listeners=${advertised_listeners}
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.enabled.mechanisms=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${admin_password}";
+num.partitions=3
+default.replication.factor=3
+```
+
+### templates/mm2_worker.properties.tftpl
+```
+bootstrap.servers=${dest_bootstrap}
+key.converter=org.apache.kafka.common.serialization.StringConverter
+value.converter=org.apache.kafka.common.serialization.StringConverter
+plugin.path=/opt/kafka/libs
+group.id=mm2-cluster
+config.storage.topic=mm2-configs
+offset.storage.topic=mm2-offsets
+status.storage.topic=mm2-status
+replication.factor=3
+tasks.max=10
+
+clusters=onprem,cloud
+onprem.bootstrap.servers=${source_bootstrap}
+cloud.bootstrap.servers=${dest_bootstrap}
+onprem->cloud.enabled=true
+onprem->cloud.topics=.*
+onprem.security.protocol=SASL_PLAINTEXT
+onprem.sasl.mechanism=PLAIN
+onprem.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="${on_prem_admin_pw}";
+cloud.security.protocol=SASL_PLAINTEXT
+cloud.sasl.mechanism=PLAIN
+cloud.sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="mirrormaker" password="${mm_password}";
+```
+
+### templates/kafka_setup.sh.tftpl
+```
+#!/bin/bash
+set -e
+
+apt-get update
+apt-get install -y openjdk-11-jdk unzip awscli
+
+aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/kafka_${kafka_version}.tgz
+tar -xzf /tmp/kafka_${kafka_version}.tgz -C /opt
+ln -s /opt/kafka_${kafka_version} /opt/kafka
+
+cat << 'EOF' > /opt/kafka/config/kraft/kafka_jaas.conf
+${jaas_config}
+EOF
+
+cat << 'EOF' > /opt/kafka/config/kraft/server.properties
+${broker_config}
+EOF
+
+${is_controller ? "cat << 'EOF' > /opt/kafka/config/kraft/controller.properties\n${controller_config}\nEOF" : ""}
+
+cat << EOF > /etc/systemd/system/kafka.service
+[Unit]
+Description=Apache Kafka Server
+After=network.target
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kraft/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/kraft/${is_controller ? "controller.properties" : "server.properties"}
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable kafka
+systemctl start kafka
+```
+
+### templates/mm2_setup.sh.tftpl
+```
+#!/bin/bash
+set -e
+
+apt-get update
+apt-get install -y openjdk-11-jdk unzip awscli
+
+aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/kafka_${kafka_version}.tgz
+tar -xzf /tmp/kafka_${kafka_version}.tgz -C /opt
+ln -s /opt/kafka_${kafka_version} /opt/kafka
+
+cat << 'EOF' > /opt/kafka/config/connect-distributed.properties
+${worker_config}
+EOF
+
+cat << 'EOF' > /opt/kafka/config/kafka_jaas.conf
+${jaas_config}
+EOF
+
+cat << EOF > /etc/systemd/system/kafka-connect.service
+[Unit]
+Description=Kafka Connect Worker
+After=network.target
+
+[Service]
+Type=simple
+Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kafka_jaas.conf"
+ExecStart=/opt/kafka/bin/connect-distributed.sh /opt/kafka/config/connect-distributed.properties
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable kafka-connect
+systemctl start kafka-connect
+```
+
+### modules/network/main.tf
+Handles VPC, private subnets, NAT Gateway, and routing.
+```
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {
+    Name = "${var.network_name}-vpc"
+  }
+}
+
+resource "aws_subnet" "private" {
+  count             = length(var.subnet_cidrs)
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.subnet_cidrs[count.index]
+  availability_zone = "${var.aws_region}${element(["a", "b", "c"], count.index)}"
+  tags = {
+    Name = "${var.network_name}-private-subnet-${count.index + 1}"
+  }
+}
+
+resource "aws_nat_gateway" "main" {
+  count         = length(aws_subnet.private)
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.private[count.index].id
+  tags = {
+    Name = "${var.network_name}-nat-${count.index + 1}"
+  }
+}
+
+resource "aws_eip" "nat" {
+  count = length(aws_subnet.private)
+  tags = {
+    Name = "${var.network_name}-eip-nat-${count.index + 1}"
+  }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main[0].id
+  }
+  tags = {
+    Name = "${var.network_name}-private-route-table"
+  }
+}
+
+resource "aws_route_table_association" "private" {
+  count          = length(aws_subnet.private)
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+```
+
+### modules/network/variables.tf
+```
+variable "network_name" { type = string }
+variable "vpc_cidr" { type = string }
+variable "subnet_cidrs" { type = list(string) }
+variable "aws_region" { type = string }
+```
+
+### modules/network/outputs.tf
+```
+output "vpc_id" {
+  value = aws_vpc.main.id
+}
+
+output "private_subnet_ids" {
+  value = aws_subnet.private[*].id
+}
+```
+
+### modules/nlb/main.tf
+Handles NLB creation for multiple ports.
+```
+resource "aws_lb" "main" {
+  name               = "${var.nlb_name}-nlb"
+  internal           = var.internal
+  load_balancer_type = "network"
+  subnets            = var.subnet_ids
+  tags = {
+    Name = "${var.nlb_name}-nlb"
+  }
+}
+
+resource "aws_lb_target_group" "main" {
+  for_each = { for port in var.ports : port => port }
+  port     = each.value
+  protocol = "TCP"
+  vpc_id   = var.vpc_id
+  target_type = "instance"
+  tags = {
+    Name = "${var.nlb_name}-tg-${each.value}"
+  }
+}
+
+resource "aws_lb_target_group_attachment" "main" {
+  for_each         = { for idx, target in flatten([for port in var.ports : [for id in var.target_instance_ids : { port = port, id = id }]]) : "${target.port}-${target.id}" => target }
+  target_group_arn = aws_lb_target_group.main[each.value.port].arn
+  target_id        = each.value.id
+  port             = each.value.port
+}
+
+resource "aws_lb_listener" "main" {
+  for_each          = aws_lb_target_group.main
+  load_balancer_arn = aws_lb.main.arn
+  port              = each.value.port
+  protocol          = "TCP"
+  default_action {
+    type             = "forward"
+    target_group_arn = each.value.arn
+  }
+}
+```
+
+### modules/nlb/variables.tf
+```
+variable "nlb_name" { type = string }
+variable "internal" { type = bool }
+variable "vpc_id" { type = string }
+variable "subnet_ids" { type = list(string) }
+variable "ports" { type = list(number) }
+variable "target_instance_ids" { type = list(string) }
+```
+
+### modules/nlb/outputs.tf
+```
+output "nlb_dns" {
+  value = aws_lb.main.dns_name
+}
+```
+
+### modules/instance/main.tf
+Generic EC2 provisioning.
+```
+resource "aws_security_group" "main" {
+  name        = "${var.instance_name}-sg"
+  description = var.sg_description
+  vpc_id      = var.vpc_id
+
+  dynamic "ingress" {
+    for_each = var.sg_ingress_rules
+    content {
+      from_port   = ingress.value.from_port
+      to_port     = ingress.value.to_port
+      protocol    = ingress.value.protocol
+      cidr_blocks = ingress.value.cidr_blocks
+    }
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_instance" "main" {
+  count                       = var.num_instances
+  ami                         = var.ami_id
+  instance_type               = var.instance_type
+  subnet_id                   = var.subnet_ids[count.index % length(var.subnet_ids)]
+  security_groups             = [aws_security_group.main.id]
+  associate_public_ip_address = false
+  user_data                   = var.user_data
+
+  tags = {
+    Name = "${var.instance_name}-${format("%02d", count.index + 1)}"
+    Role = var.instance_role
+  }
+}
+```
+
+### modules/instance/variables.tf
+```
+variable "instance_name" { type = string }
+variable "ami_id" { type = string }
+variable "instance_type" { type = string }
+variable "subnet_ids" { type = list(string) }
+variable "num_instances" { type = number }
+variable "user_data" { type = string }
+variable "vpc_id" { type = string }
+variable "sg_description" { type = string }
+variable "sg_ingress_rules" {
+  type = list(object({
+    from_port   = number
+    to_port     = number
+    protocol    = string
+    cidr_blocks = list(string)
+  }))
+}
+variable "instance_role" { type = string }
+```
+
+### modules/instance/outputs.tf
+```
+output "instance_ids" {
+  value = aws_instance.main[*].id
+}
+
+output "instance_ips" {
+  value = aws_instance.main[*].private_ip
+}
+
+output "sg_id" {
+  value = aws_security_group.main.id
+}
+```
+
+### modules/kafka_cluster/main.tf
+Uses shared modules for Kafka cluster.
+```
+module "network" {
+  source       = "../network"
+  network_name = var.cluster_name
+  vpc_cidr     = var.vpc_cidr
+  subnet_cidrs = var.subnet_cidrs
+  aws_region   = var.aws_region
+}
+
+data "template_file" "kafka_jaas" {
+  template = file("${path.module}/../../templates/kafka_jaas.conf.tftpl")
+  vars = {
+    admin_username = keys(var.sasl_users)[0]
+    admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    mm_username    = keys(var.sasl_users)[1]
+    mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+  }
+}
+
+module "kafka_instances" {
+  source            = "../instance"
+  instance_name     = var.cluster_name
+  ami_id            = var.ami_id
+  instance_type     = var.instance_type
+  subnet_ids        = module.network.private_subnet_ids
+  num_instances     = var.num_nodes
+  vpc_id            = module.network.vpc_id
+  sg_description    = "Kafka cluster security group"
+  instance_role     = "kafka"
+  sg_ingress_rules  = [
+    { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = var.cluster_name == "kafka-cluster-dev" ? ["0.0.0.0/0"] : ["10.0.0.0/8"] },
+    { from_port = 9092, to_port = 9092, protocol = "tcp", cidr_blocks = ["10.0.0.0/8"] },
+    { from_port = 9093, to_port = 9093, protocol = "tcp", cidr_blocks = ["10.0.0.0/8"] }
+  ]
+  user_data = templatefile("${path.module}/../../templates/kafka_setup.sh.tftpl", {
+    s3_bucket           = var.s3_bucket
+    kafka_version       = var.kafka_version
+    jaas_config         = data.template_file.kafka_jaas.rendered
+    is_controller       = false  # Handled dynamically
+    broker_config       = templatefile("${path.module}/../../templates/server.properties.tftpl", {
+      node_id           = 0  # Overridden
+      controller_quorum = "" # Overridden
+      admin_password    = var.sasl_users[keys(var.sasl_users)[0]]
+      advertised_listeners = "" # Overridden
+    })
+    controller_config   = templatefile("${path.module}/../../templates/controller.properties.tftpl", {
+      node_id           = 0
+      controller_quorum = ""
+      admin_password    = var.sasl_users[keys(var.sasl_users)[0]]
+      advertised_listeners = ""
+    })
+  })
+}
+
+# Dynamic user_data per instance (Kafka vs. controller)
+locals {
+  kafka_instances = [
+    for idx in range(var.num_nodes) : {
+      idx              = idx
+      is_controller    = idx < var.num_controllers
+      node_id          = idx + 1
+      controller_quorum = join(",", [for i in slice(module.kafka_instances.instance_ips, 0, var.num_controllers) : "${i}:9093"])
+      node_ip          = module.kafka_instances.instance_ips[idx]
+      advertised_listeners = "SASL_PLAINTEXT://${module.nlb.nlb_dns}:9092"
+    }
+  ]
+}
+
+resource "null_resource" "kafka_user_data" {
+  count = var.num_nodes
+  triggers = {
+    instance_id = module.kafka_instances.instance_ids[count.index]
+    user_data   = templatefile("${path.module}/../../templates/kafka_setup.sh.tftpl", {
+      s3_bucket           = var.s3_bucket
+      kafka_version       = var.kafka_version
+      jaas_config         = data.template_file.kafka_jaas.rendered
+      is_controller       = local.kafka_instances[count.index].is_controller
+      broker_config       = templatefile("${path.module}/../../templates/server.properties.tftpl", {
+        node_id           = local.kafka_instances[count.index].node_id
+        controller_quorum = local.kafka_instances[count.index].controller_quorum
+        admin_password    = var.sasl_users[keys(var.sasl_users)[0]]
+        advertised_listeners = local.kafka_instances[count.index].advertised_listeners
+      })
+      controller_config   = local.kafka_instances[count.index].is_controller ? templatefile("${path.module}/../../templates/controller.properties.tftpl", {
+        node_id           = local.kafka_instances[count.index].node_id
+        controller_quorum = local.kafka_instances[count.index].controller_quorum
+        admin_password    = var.sasl_users[keys(var.sasl_users)[0]]
+        advertised_listeners = local.kafka_instances[count.index].advertised_listeners
+      }) : ""
+    })
+  }
+}
+
+module "nlb" {
+  source            = "../nlb"
+  nlb_name          = var.cluster_name
+  internal          = false
+  vpc_id            = module.network.vpc_id
+  subnet_ids        = module.network.private_subnet_ids
+  ports             = [9092, 9093]
+  target_instance_ids = module.kafka_instances.instance_ids
+}
+
+# Outputs
+output "vpc_id" {
+  value = module.network.vpc_id
+}
+
+output "private_subnet_ids" {
+  value = module.network.private_subnet_ids
+}
+
+output "kafka_node_ips" {
+  value = module.kafka_instances.instance_ips
+}
+
+output "controller_ips" {
+  value = slice(module.kafka_instances.instance_ips, 0, var.num_controllers)
+}
+
+output "nlb_dns" {
+  value = module.nlb.nlb_dns
+}
+```
+
+### modules/kafka_cluster/variables.tf
+```
+variable "cluster_name" { type = string }
+variable "instance_type" { type = string }
+variable "ami_id" { type = string }
+variable "s3_bucket" { type = string }
+variable "kafka_version" { type = string }
+variable "num_nodes" { type = number }
+variable "num_controllers" { type = number }
+variable "vpc_cidr" { type = string }
+variable "subnet_cidrs" { type = list(string) }
+variable "sasl_users" { type = map(string) }
+variable "aws_region" { type = string }
+```
+
+### modules/kafka_cluster/outputs.tf
+```
+output "vpc_id" {
+  value = module.network.vpc_id
+}
+
+output "private_subnet_ids" {
+  value = module.network.private_subnet_ids
+}
+
+output "kafka_node_ips" {
+  value = module.kafka_instances.instance_ips
+}
+
+output "controller_ips" {
+  value = slice(module.kafka_instances.instance_ips, 0, var.num_controllers)
+}
+
+output "nlb_dns" {
+  value = module.nlb.nlb_dns
+}
+```
+
+### modules/mm2_cluster/main.tf
+Uses shared modules for MM2 cluster.
+```
+module "mm2_instances" {
+  source            = "../instance"
+  instance_name     = var.cluster_name
+  ami_id            = var.ami_id
+  instance_type     = var.instance_type
+  subnet_ids        = var.private_subnet_ids
+  num_instances     = var.num_nodes
+  vpc_id            = var.vpc_id
+  sg_description    = "MirrorMaker cluster security group"
+  instance_role     = "mirrormaker"
+  sg_ingress_rules  = [
+    { from_port = 22, to_port = 22, protocol = "tcp", cidr_blocks = var.cluster_name == "mm2-cluster-dev" ? ["0.0.0.0/0"] : ["10.0.0.0/8"] }
+  ]
+  user_data = templatefile("${path.module}/../../templates/mm2_setup.sh.tftpl", {
+    s3_bucket        = var.s3_bucket
+    kafka_version    = var.kafka_version
+    jaas_config      = data.template_file.mm2_jaas.rendered
+    worker_config    = templatefile("${path.module}/../../templates/mm2_worker.properties.tftpl", {
+      source_bootstrap = var.source_bootstrap
+      dest_bootstrap   = var.dest_bootstrap
+      mm_password      = var.sasl_users["mirrormaker"]
+      on_prem_admin_pw = var.on_prem_sasl_users["admin"]
+    })
+  })
+}
+
+data "template_file" "mm2_jaas" {
+  template = file("${path.module}/../../templates/kafka_jaas.conf.tftpl")
+  vars = {
+    admin_username = keys(var.sasl_users)[0]
+    admin_password = var.sasl_users[keys(var.sasl_users)[0]]
+    mm_username    = keys(var.sasl_users)[1]
+    mm_password    = var.sasl_users[keys(var.sasl_users)[1]]
+  }
+}
+
+# Outputs
+output "mm2_node_ips" {
+  value = module.mm2_instances.instance_ips
+}
+
+output "mm2_sg_id" {
+  value = module.mm2_instances.sg_id
+}
+```
+
+### modules/mm2_cluster/variables.tf
+```
+variable "cluster_name" { type = string }
+variable "instance_type" { type = string }
+variable "ami_id" { type = string }
+variable "s3_bucket" { type = string }
+variable "kafka_version" { type = string }
+variable "num_nodes" { type = number }
+variable "vpc_id" { type = string }
+variable "private_subnet_ids" { type = list(string) }
+variable "source_bootstrap" { type = string }
+variable "dest_bootstrap" { type = string }
+variable "sasl_users" { type = map(string) }
+variable "on_prem_sasl_users" { type = map(string) }
+```
+
+### modules/mm2_cluster/outputs.tf
+```
+output "mm2_node_ips" {
+  value = module.mm2_instances.instance_ips
+}
+
+output "mm2_sg_id" {
+  value = module.mm2_instances.sg_id
+}
+```
+
+## Usage Instructions
+1. **Prerequisites**:
+   - Configure AWS credentials.
+   - Ensure `kafka_3.9.0.tgz` is in the S3 bucket.
+   - Set up Site-to-Site VPN or Direct Connect for on-prem access.
+2. **Setup**:
+   - Create the directory structure and save files.
+   - Update `variables.tf` with correct `ami_id`, `s3_bucket`, `on_prem_bootstrap`, and `sasl_users`.
+3. **Apply**:
+   ```bash
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+4. **Scaling to 50 Clusters**:
+   - Add entries to `clusters` map (e.g., `cluster-5 = { vpc_cidr = "10.4.0.0/16", ... }`).
+   - Re-run `terraform apply`.
+5. **Verification**:
+   - Check outputs: `terraform output cluster_ips`, `mm2_node_ips`, `nlb_dns`.
+   - Use AWS Systems Manager (SSM) for SSH to private instances.
+   - Verify services: `systemctl status kafka`, `systemctl status kafka-connect`.
+   - Test replication with `kafka-console-consumer` via NLB DNS.
+6. **Security Enhancements**:
+   - Use AWS Secrets Manager for `sasl_users`:
+     ```bash
+     aws secretsmanager get-secret-value --secret-id kafka-sasl-users-${var.cluster_name}
+     ```
+   - Switch to SASL/SSL in Prod (`security.protocol=SASL_SSL`).
+7. **Monitoring**:
+   - Add CloudWatch agent via `user_data`:
+     ```bash
+     apt-get install -y amazon-cloudwatch-agent
+     ```
+
+## Modularity Improvements
+- **Network Module**: Centralizes VPC/subnet/NAT logic, reusable across Kafka and MM2.
+- **NLB Module**: Dynamically handles multiple ports (9092, 9093), reusable for any service.
+- **Instance Module**: Abstracts EC2 provisioning, parameterized for Kafka or MM2.
+- **Dynamic User Data**: Uses `null_resource` to customize Kafka `user_data` per instance (controller vs. broker).
+- **Scaling**: Add clusters by updating `clusters` map; Terraform’s `for_each` handles creation without affecting existing resources.
+
+## Notes
+- **On-Prem Connectivity**: Ensure VPN/Direct Connect is configured. Add `aws_vpn_gateway` if needed.
+- **Scaling Limits**: Request EC2 quota increase (600+ instances for 50 clusters).
+- **Cost**: ~$2,300/month for Prod (12 m5.2xlarge + 3 t3.medium). Use Spot Instances for Dev/QA.
+- **Monitoring**: Add Prometheus/Grafana module if needed.
+
+If you share your Ansible playbook or specific replication details, I can refine further. Want a diagram or test scripts?
+
+
+
+
+*****************************************************************************TEST*****************************************
+Below is a test script to verify the functionality of your multi-environment Kafka 3.9 setup with separate MirrorMaker 2.0 (MM2) clusters for replicating data from an on-premises Kafka cluster to cloud-based Kafka clusters (Dev, QA, Staging, Prod). The script checks the following:
+
+1. **Kafka Cluster Health**: Verifies that Kafka services are running on all nodes and that the cluster is operational (e.g., topic creation/listing works).
+2. **MirrorMaker Health**: Confirms MM2 services (Kafka Connect workers) are running and replication is active.
+3. **Replication Validation**: Tests data flow from on-prem to cloud by producing messages to the on-prem cluster and consuming them from the cloud Kafka cluster via the NLB.
+4. **NLB Accessibility**: Ensures Kafka ports (9092, 9093) are reachable via the NLB DNS.
+5. **Environment Isolation**: Checks that each environment (Dev, QA, Staging, Prod) is correctly isolated and accessible.
+
+The script is written in Bash, designed to run from a bastion host or a local machine with AWS CLI, SSH access (via AWS Systems Manager or SSH keys), and Kafka CLI tools installed. It assumes a Site-to-Site VPN or Direct Connect is set up for on-prem connectivity.
+
+---
+
+### Assumptions
+- **Environment**: Ubuntu-based bastion host or local machine with:
+  - AWS CLI (`aws`) configured with credentials.
+  - SSH access to private EC2 instances (via SSM or SSH key).
+  - Kafka 3.9 CLI tools installed (`kafka-topics.sh`, `kafka-console-producer.sh`, `kafka-console-consumer.sh`).
+- **Inputs**: Terraform outputs (`cluster_ips`, `mm2_node_ips`, `nlb_dns`) and credentials (JAAS for on-prem and cloud).
+- **Networking**: All instances are in private subnets; NLBs expose ports 9092/9093; VPN/Direct Connect connects on-prem to cloud.
+- **Security**: SASL/PLAIN with JAAS (`admin` and `mirrormaker` users).
+- **Test Topic**: `test-topic` for replication testing.
+
+---
+
+### Test Script (`test_kafka_setup.sh`)
+
+```bash
+#!/bin/bash
+set -e
+
+# Configuration
+AWS_REGION="us-east-1"
+ENVIRONMENTS=("dev" "qa" "staging" "prod")
+KAFKA_VERSION="3.9.0"
+ON_PREM_BOOTSTRAP="onprem-kafka1.example.com:9092,onprem-kafka2.example.com:9092"
+ON_PREM_ADMIN_USER="admin"
+ON_PREM_ADMIN_PASS="onprem-admin-secret"
+TEST_TOPIC="test-topic"
+
+# JAAS configuration files for client access
+CLOUD_JAAS_FILE="/tmp/kafka_client_jaas.conf"
+ON_PREM_JAAS_FILE="/tmp/onprem_kafka_client_jaas.conf"
+
+# Terraform outputs (replace with actual outputs or fetch dynamically)
+# Example: terraform output -json cluster_ips > cluster_ips.json
+CLUSTER_IPS_JSON="cluster_ips.json"
+MM2_IPS_JSON="mm2_node_ips.json"
+NLB_DNS_JSON="nlb_dns.json"
+
+# Kafka CLI path
+KAFKA_HOME="/opt/kafka_${KAFKA_VERSION}"
+KAFKA_BIN="${KAFKA_HOME}/bin"
+
+# Log file
+LOG_FILE="kafka_test_$(date +%F_%H-%M-%S).log"
+exec 3>&1 1>>${LOG_FILE} 2>&1
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# Helper function to log messages
+log() {
+  echo -e "[$(date +%F_%H:%M:%S)] $1" >&3
+}
+
+# Helper function to check command status
+check_status() {
+  if [ $? -eq 0 ]; then
+    log "${GREEN}SUCCESS: $1${NC}"
+  else
+    log "${RED}FAILURE: $1${NC}"
+    exit 1
+  fi
+}
+
+# Create JAAS files
+create_jaas_files() {
+  log "Creating JAAS configuration files"
+  for env in "${ENVIRONMENTS[@]}"; do
+    admin_user="admin"
+    admin_pass=$(jq -r ".clusters.${env}.sasl_users.admin" variables.json)
+    mm_user="mirrormaker"
+    mm_pass=$(jq -r ".clusters.${env}.sasl_users.mirrormaker" variables.json)
+
+    cat << EOF > "${CLOUD_JAAS_FILE}_${env}"
+KafkaClient {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="${admin_user}"
+  password="${admin_pass}";
+};
+EOF
+  done
+
+  cat << EOF > "${ON_PREM_JAAS_FILE}"
+KafkaClient {
+  org.apache.kafka.common.security.plain.PlainLoginModule required
+  username="${ON_PREM_ADMIN_USER}"
+  password="${ON_PREM_ADMIN_PASS}";
+};
+EOF
+  check_status "Created JAAS files"
+}
+
+# Check Kafka service status
+check_kafka_service() {
+  local env=$1
+  log "Checking Kafka service status for ${env}"
+  local ips=($(jq -r ".${env}[]" "${CLUSTER_IPS_JSON}"))
+  for ip in "${ips[@]}"; do
+    log "Checking Kafka on ${ip}"
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${ip} \
+      "systemctl is-active kafka" >/dev/null
+    check_status "Kafka service on ${ip}"
+  done
+}
+
+# Check MirrorMaker service status
+check_mm2_service() {
+  local env=$1
+  log "Checking MirrorMaker service status for ${env}"
+  local ips=($(jq -r ".${env}[]" "${MM2_IPS_JSON}"))
+  for ip in "${ips[@]}"; do
+    log "Checking MM2 on ${ip}"
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${ip} \
+      "systemctl is-active kafka-connect" >/dev/null
+    check_status "MM2 service on ${ip}"
+  done
+}
+
+# Check NLB accessibility
+check_nlb_access() {
+  local env=$1
+  log "Checking NLB accessibility for ${env}"
+  local nlb_dns=$(jq -r ".${env}" "${NLB_DNS_JSON}")
+  for port in 9092 9093; do
+    nc -zv "${nlb_dns}" ${port} >/dev/null
+    check_status "NLB ${nlb_dns}:${port}"
+  done
+}
+
+# Test Kafka cluster health (create/list topic)
+test_kafka_health() {
+  local env=$1
+  local nlb_dns=$(jq -r ".${env}" "${NLB_DNS_JSON}")
+  log "Testing Kafka cluster health for ${env}"
+
+  # Create test topic
+  ${KAFKA_BIN}/kafka-topics.sh \
+    --bootstrap-server "${nlb_dns}:9092" \
+    --command-config "${CLOUD_JAAS_FILE}_${env}" \
+    --create \
+    --topic "${TEST_TOPIC}" \
+    --partitions 3 \
+    --replication-factor 3 >/dev/null
+  check_status "Created test topic in ${env}"
+
+  # List topics to verify
+  ${KAFKA_BIN}/kafka-topics.sh \
+    --bootstrap-server "${nlb_dns}:9092" \
+    --command-config "${CLOUD_JAAS_FILE}_${env}" \
+    --list | grep "${TEST_TOPIC}" >/dev/null
+  check_status "Listed test topic in ${env}"
+}
+
+# Test replication (on-prem to cloud)
+test_replication() {
+  local env=$1
+  local nlb_dns=$(jq -r ".${env}" "${NLB_DNS_JSON}")
+  log "Testing replication from on-prem to ${env}"
+
+  # Produce message to on-prem
+  echo "Test message from on-prem" | ${KAFKA_BIN}/kafka-console-producer.sh \
+    --broker-list "${ON_PREM_BOOTSTRAP}" \
+    --producer.config "${ON_PREM_JAAS_FILE}" \
+    --topic "${TEST_TOPIC}" >/dev/null
+  check_status "Produced message to on-prem"
+
+  # Consume from cloud (wait for replication)
+  timeout 30s ${KAFKA_BIN}/kafka-console-consumer.sh \
+    --bootstrap-server "${nlb_dns}:9092" \
+    --consumer.config "${CLOUD_JAAS_FILE}_${env}" \
+    --topic "${TEST_TOPIC}" \
+    --from-beginning | grep "Test message from on-prem" >/dev/null
+  check_status "Consumed replicated message in ${env}"
+}
+
+# Main test function
+main() {
+  log "Starting Kafka cluster test suite"
+
+  # Generate JAAS files
+  create_jaas_files
+
+  # Check each environment
+  for env in "${ENVIRONMENTS[@]}"; do
+    log "Testing environment: ${env}"
+    check_kafka_service "${env}"
+    check_mm2_service "${env}"
+    check_nlb_access "${env}"
+    test_kafka_health "${env}"
+    test_replication "${env}"
+  done
+
+  log "${GREEN}All tests passed successfully!${NC}"
+}
+
+# Export variables for Kafka CLI
+export KAFKA_OPTS="-Djava.security.auth.login.config=${CLOUD_JAAS_FILE}"
+
+# Generate Terraform output JSON files (if not already present)
+if [ ! -f "${CLUSTER_IPS_JSON}" ]; then
+  terraform output -json cluster_ips > "${CLUSTER_IPS_JSON}"
+fi
+if [ ! -f "${MM2_IPS_JSON}" ]; then
+  terraform output -json mm2_node_ips > "${MM2_IPS_JSON}"
+fi
+if [ ! -f "${NLB_DNS_JSON}" ]; then
+  terraform output -json nlb_dns > "${NLB_DNS_JSON}"
+fi
+
+# Generate variables.json from variables.tf
+if [ ! -f "variables.json" ]; then
+  terraform console -var-file=terraform.tfvars <<EOF | jq . > variables.json
+  var.clusters
+EOF
+fi
+
+# Run tests
+main
+```
+
+---
+
+### Prerequisites
+1. **Bastion Host Setup**:
+   - Ubuntu 20.04+ with AWS CLI, SSH, and Kafka CLI tools.
+   - Install Kafka CLI:
+     ```bash
+     wget https://archive.apache.org/dist/kafka/3.9.0/kafka_3.9.0.tgz
+     tar -xzf kafka_3.9.0.tgz -C /opt
+     ln -s /opt/kafka_3.9.0 /opt/kafka_3.9.0
+     ```
+   - Install `jq` for JSON parsing: `sudo apt-get install jq`.
+   - Configure AWS CLI: `aws configure`.
+2. **Terraform Outputs**:
+   - Run `terraform output -json cluster_ips > cluster_ips.json` (and similarly for `mm2_node_ips`, `nlb_dns`) in your Terraform directory.
+   - Copy these JSON files to the test machine.
+3. **Networking**:
+   - Ensure Site-to-Site VPN/Direct Connect is configured for on-prem access.
+   - Update `ON_PREM_BOOTSTRAP`, `ON_PREM_ADMIN_USER`, `ON_PREM_ADMIN_PASS` in the script.
+4. **SSH Access**:
+   - Use an SSH key (`~/.ssh/id_rsa`) or configure AWS Systems Manager (SSM) for private instance access:
+     ```bash
+     aws ssm start-session --target <instance-id>
+     ```
+5. **Variables JSON**:
+   - Generate `variables.json` from `variables.tf` (script includes a step for this).
+
+---
+
+### How to Run
+1. **Save Script**:
+   - Save as `test_kafka_setup.sh`.
+   - Make executable: `chmod +x test_kafka_setup.sh`.
+2. **Prepare Inputs**:
+   - Ensure `cluster_ips.json`, `mm2_node_ips.json`, `nlb_dns.json` exist (from Terraform outputs).
+   - Update script variables (`ON_PREM_BOOTSTRAP`, etc.) as needed.
+3. **Execute**:
+   ```bash
+   ./test_kafka_setup.sh
+   ```
+4. **Review Output**:
+   - Logs are written to `kafka_test_<timestamp>.log`.
+   - Console shows pass/fail status for each test.
+
+---
+
+### Expected Output
+```
+[2025-10-24_06:56:00] Starting Kafka cluster test suite
+[2025-10-24_06:56:01] Creating JAAS configuration files
+[2025-10-24_06:56:01] SUCCESS: Created JAAS files
+[2025-10-24_06:56:02] Testing environment: dev
+[2025-10-24_06:56:02] Checking Kafka service status for dev
+[2025-10-24_06:56:03] Checking Kafka on 10.0.1.10
+[2025-10-24_06:56:03] SUCCESS: Kafka service on 10.0.1.10
+...
+[2025-10-24_06:56:10] Checking NLB accessibility for dev
+[2025-10-24_06:56:10] SUCCESS: NLB kafka-cluster-dev-nlb:9092
+[2025-10-24_06:56:10] SUCCESS: NLB kafka-cluster-dev-nlb:9093
+...
+[2025-10-24_06:56:15] Testing replication from on-prem to dev
+[2025-10-24_06:56:15] SUCCESS: Produced message to on-prem
+[2025-10-24_06:56:16] SUCCESS: Consumed replicated message in dev
+...
+[2025-10-24_06:56:30] All tests passed successfully!
+```
+
+---
+
+### Troubleshooting
+- **SSH Failure**: Ensure SSH key or SSM is configured. Add bastion host to VPC if needed.
+- **NLB Unreachable**: Verify security group rules and VPN connectivity. Test with `telnet <nlb_dns> 9092`.
+- **Replication Failure**: Check MM2 logs on nodes (`/opt/kafka/logs/connect.log`). Ensure on-prem bootstrap servers are accessible.
+- **Topic Creation Failure**: Verify JAAS credentials and NLB DNS in `advertised.listeners`.
+
+---
+
+### Enhancements
+1. **Add Monitoring Checks**:
+   - Query CloudWatch for Kafka/MM2 metrics:
+     ```bash
+     aws cloudwatch get-metric-statistics --namespace AWS/Kafka --metric-name BrokerCpuUtilization
+     ```
+2. **Automate with CI/CD**:
+   - Run tests in GitHub Actions post-Terraform apply:
+     ```yaml
+     - name: Run Kafka Tests
+       run: ./test_kafka_setup.sh
+     ```
+3. **Custom Topics**:
+   - Modify `TEST_TOPIC` or add multiple topics to test specific replication patterns.
+4. **Security**:
+   - Store credentials in AWS Secrets Manager:
+     ```bash
+     admin_pass=$(aws secretsmanager get-secret-value --secret-id kafka-sasl-users-${env} --query SecretString --output text | jq -r .admin)
+     ```
+
+If you need a diagram, specific topic patterns, or integration with existing tools, let me know!
