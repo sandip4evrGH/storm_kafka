@@ -1,0 +1,417 @@
+Testing Terraform configurations locally without connecting to AWS (or any cloud provider) is a common practice to validate syntax, module structure, and configuration logic before deployment. Since your setup involves a multi-environment Kafka 3.9 configuration with MirrorMaker 2.0, private subnets, and NLBs, we’ll focus on testing the Terraform code itself (not the actual Kafka/MM2 functionality) in a dry-run or simulated environment. This avoids incurring AWS costs or requiring live connectivity. Below are methods to test your Terraform configuration locally, including the modular structure provided earlier, along with a tailored test script to validate the code.
+
+---
+
+### Approaches to Test Terraform Locally
+1. **Terraform Validate**: Checks syntax and configuration validity without interacting with AWS.
+2. **Terraform Plan (Dry Run)**: Generates an execution plan to preview changes without applying them. Uses a local state file or mock provider to avoid AWS API calls.
+3. **Terraform Unit Testing (Terratest)**: Uses Go-based tests to validate module outputs, variable interpolation, and resource configurations in a controlled environment.
+4. **Local Mocking with `localstack`**: Simulates AWS services (e.g., EC2, S3, VPC) locally to test infrastructure provisioning without hitting AWS.
+5. **Static Analysis with `tflint` or `tfsec`**: Checks for best practices, security issues, and potential errors in the Terraform code.
+
+Since you want to test without connecting to AWS, we’ll focus on **Terraform Validate**, **Terraform Plan**, **Terratest**, and **tflint**, as these methods don’t require live AWS connectivity. `localstack` requires a running Docker environment and more setup, so I’ll include it as an optional advanced approach. I’ll also provide a test script to automate these checks.
+
+---
+
+### Prerequisites
+- **Terraform**: Installed locally (version ~1.5 or compatible with `aws` provider ~5.0).
+  ```bash
+  terraform version
+  ```
+- **Go**: Required for Terratest (optional, if using unit tests).
+  ```bash
+  go version
+  ```
+- **tflint**: For static analysis.
+  ```bash
+  curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+  ```
+- **jq**: For parsing JSON outputs in the test script.
+  ```bash
+  sudo apt-get install jq
+  ```
+- **Directory Structure**: Ensure your Terraform project (`kafka-terraform/`) is set up as described in the modular configuration (with `main.tf`, `variables.tf`, `templates/`, and `modules/`).
+- **No AWS Credentials**: Remove or unset AWS credentials to prevent accidental API calls:
+  ```bash
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  ```
+
+---
+
+### Testing Methods
+
+#### 1. Terraform Validate
+- **Purpose**: Checks HCL syntax and resource/module references.
+- **Command**:
+  ```bash
+  terraform init
+  terraform validate
+  ```
+- **Expected Output**: If successful, outputs `Success! The configuration is valid.`
+- **Use Case**: Catches syntax errors, missing variables, or invalid resource attributes.
+
+#### 2. Terraform Plan (Dry Run)
+- **Purpose**: Generates a plan to preview resource creation without applying changes. Requires a mock provider or no provider credentials to avoid AWS calls.
+- **Command**:
+  ```bash
+  terraform init
+  terraform plan -out=tfplan -var-file=terraform.tfvars
+  ```
+- **Without AWS Credentials**: Terraform will fail to connect to AWS but still validate the configuration locally. Use `-no-color` for cleaner output.
+- **Expected Output**: Shows a plan with resources (e.g., `aws_vpc`, `aws_instance`) or an error if credentials are missing (still validates syntax).
+- **Use Case**: Verifies variable interpolation, module dependencies, and resource counts.
+
+#### 3. Terratest for Unit Testing
+- **Purpose**: Programmatically tests Terraform outputs, variable logic, and module structure using Go.
+- **Setup**:
+  - Install Go: `sudo apt-get install golang`.
+  - Install Terratest: `go get github.com/gruntwork-io/terratest/modules/terraform`.
+- **Test File**: Create `test/kafka_test.go` to validate the Kafka and MM2 modules.
+- **Use Case**: Ensures module outputs (e.g., `nlb_dns`, `kafka_node_ips`) are correct and variables are properly handled.
+
+#### 4. Static Analysis with `tflint`
+- **Purpose**: Checks for best practices, deprecated resources, and potential errors.
+- **Command**:
+  ```bash
+  tflint --init
+  tflint
+  ```
+- **Configuration**: Create `.tflint.hcl` in the project root:
+  ```hcl
+  plugin "aws" {
+    enabled = true
+    version = "0.24.1"
+    source  = "github.com/terraform-linters/tflint-ruleset-aws"
+  }
+  ```
+- **Expected Output**: Reports issues like unused variables or missing tags.
+- **Use Case**: Ensures code quality and adherence to AWS best practices.
+
+#### 5. Localstack (Optional, Advanced)
+- **Purpose**: Simulates AWS services locally using Docker to test provisioning.
+- **Setup**:
+  - Install Docker: `sudo apt-get install docker.io`.
+  - Install Localstack: `pip install localstack`.
+  - Start Localstack:
+    ```bash
+    localstack start -d
+    ```
+  - Configure Terraform to use Localstack endpoints:
+    ```hcl
+    provider "aws" {
+      region                      = "us-east-1"
+      access_key                  = "mock_access_key"
+      secret_key                  = "mock_secret_key"
+      skip_credentials_validation = true
+      skip_requesting_account_id  = true
+      endpoints {
+        ec2  = "http://localhost:4566"
+        s3   = "http://localhost:4566"
+        elb  = "http://localhost:4566"
+      }
+    }
+    ```
+- **Limitations**: Localstack may not support all AWS resources (e.g., NLB specifics). Use for basic validation only.
+- **Use Case**: Simulates AWS resource creation locally.
+
+---
+
+### Test Script (`test_terraform_locally.sh`)
+
+This script automates `terraform validate`, `terraform plan`, and `tflint`, and includes a basic Terratest setup to validate module outputs without AWS connectivity. It assumes the modular Kafka Terraform structure from your previous setup.
+
+```bash
+#!/bin/bash
+set -e
+
+# Configuration
+PROJECT_DIR="kafka-terraform"
+LOG_FILE="terraform_test_$(date +%F_%H-%M-%S).log"
+TERRATEST_DIR="test"
+TERRAFORM_TFVARS="terraform.tfvars"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+# Helper function to log messages
+log() {
+  echo -e "[$(date +%F_%H:%M:%S)] $1" | tee -a "${LOG_FILE}"
+}
+
+# Helper function to check command status
+check_status() {
+  if [ $? -eq 0 ]; then
+    log "${GREEN}SUCCESS: $1${NC}"
+  else
+    log "${RED}FAILURE: $1${NC}"
+    exit 1
+  fi
+}
+
+# Check prerequisites
+check_prerequisites() {
+  log "Checking prerequisites"
+  command -v terraform >/dev/null 2>&1 || { log "${RED}Terraform not installed${NC}"; exit 1; }
+  command -v tflint >/dev/null 2>&1 || { log "${RED}tflint not installed${NC}"; exit 1; }
+  command -v go >/dev/null 2>&1 || log "${YELLOW}Go not installed; skipping Terratest${NC}"
+  check_status "Prerequisite check"
+}
+
+# Initialize Terraform
+init_terraform() {
+  log "Initializing Terraform"
+  cd "${PROJECT_DIR}"
+  terraform init -backend=false >/dev/null
+  check_status "Terraform init"
+}
+
+# Validate Terraform configuration
+validate_terraform() {
+  log "Validating Terraform configuration"
+  terraform validate
+  check_status "Terraform validate"
+}
+
+# Run Terraform plan (dry run)
+run_terraform_plan() {
+  log "Running Terraform plan (dry run)"
+  if [ -f "${TERRAFORM_TFVARS}" ]; then
+    terraform plan -out=tfplan -var-file="${TERRAFORM_TFVARS}" -no-color > plan_output.txt
+  else
+    terraform plan -out=tfplan -no-color > plan_output.txt
+  fi
+  check_status "Terraform plan"
+  log "Checking plan for resource counts"
+  grep "Plan:.*to add,.*to change,.*to destroy" plan_output.txt
+  check_status "Plan resource count check"
+}
+
+# Run tflint for static analysis
+run_tflint() {
+  log "Running tflint"
+  tflint --init >/dev/null
+  tflint
+  check_status "tflint analysis"
+}
+
+# Generate Terratest file
+generate_terratest() {
+  log "Generating Terratest file"
+  mkdir -p "${TERRATEST_DIR}"
+  cat << EOF > "${TERRATEST_DIR}/kafka_test.go"
+package test
+
+import (
+    "testing"
+    "github.com/gruntwork-io/terratest/modules/terraform"
+    "github.com/stretchr/testify/assert"
+)
+
+func TestKafkaModules(t *testing.T) {
+    terraformOptions := terraform.WithDefaultRetryableErrors(t, &terraform.Options{
+        TerraformDir: "../${PROJECT_DIR}",
+        VarFiles:     []string{"${TERRAFORM_TFVARS}"},
+        NoColor:      true,
+    })
+
+    // Don't apply, just plan
+    terraform.Init(t, terraformOptions)
+    plan := terraform.RunTerraformCommand(t, terraformOptions, terraform.FormatArgs(terraformOptions, "plan", "-out=tfplan")...)
+
+    // Validate module outputs
+    for _, env := range []string{"dev", "qa", "staging", "prod"} {
+        assert.Contains(t, plan, "kafka-cluster-"+env, "Module for "+env+" should be planned")
+        assert.Contains(t, plan, "mm2-cluster-"+env, "MM2 module for "+env+" should be planned")
+    }
+
+    // Check resource counts
+    assert.Contains(t, plan, "Plan: ", "Plan should include resource counts")
+}
+EOF
+  check_status "Generated Terratest file"
+}
+
+# Run Terratest (if Go is installed)
+run_terratest() {
+  if command -v go >/dev/null 2>&1; then
+    log "Running Terratest"
+    cd "${TERRATEST_DIR}"
+    go mod init test >/dev/null
+    go get github.com/gruntwork-io/terratest/modules/terraform >/dev/null
+    go get github.com/stretchr/testify/assert >/dev/null
+    go test -v
+    check_status "Terratest execution"
+    cd ..
+  else
+    log "${YELLOW}Skipping Terratest (Go not installed)${NC}"
+  fi
+}
+
+# Main test function
+main() {
+  log "Starting Terraform local test suite"
+  check_prerequisites
+  init_terraform
+  validate_terraform
+  run_terraform_plan
+  run_tflint
+  generate_terratest
+  run_terratest
+  log "${GREEN}All tests passed successfully!${NC}"
+}
+
+# Run tests
+main
+```
+
+---
+
+### How to Use the Test Script
+
+1. **Prepare Environment**:
+   - Ensure Terraform, `tflint`, and `jq` are installed.
+   - Install Go if using Terratest (optional).
+   - Save the script as `test_terraform_locally.sh` in the parent directory of `kafka-terraform/`.
+   - Make executable: `chmod +x test_terraform_locally.sh`.
+
+2. **Set Up Project**:
+   - Ensure the `kafka-terraform/` directory contains all files (`main.tf`, `variables.tf`, `templates/`, `modules/`).
+   - Create an optional `terraform.tfvars` with overrides (e.g., `aws_region = "us-east-1"`).
+   - Create `.tflint.hcl` in `kafka-terraform/`:
+     ```hcl
+     plugin "aws" {
+       enabled = true
+       version = "0.24.1"
+       source  = "github.com/terraform-linters/tflint-ruleset-aws"
+     }
+     ```
+
+3. **Run the Script**:
+   ```bash
+   ./test_terraform_locally.sh
+   ```
+
+4. **Review Output**:
+   - Logs are written to `terraform_test_<timestamp>.log`.
+   - Console shows pass/fail status for each test.
+   - Example output:
+     ```
+     [2025-10-24_07:10:00] Starting Terraform local test suite
+     [2025-10-24_07:10:01] SUCCESS: Prerequisite check
+     [2025-10-24_07:10:02] SUCCESS: Terraform init
+     [2025-10-24_07:10:03] SUCCESS: Terraform validate
+     [2025-10-24_07:10:04] SUCCESS: Terraform plan
+     [2025-10-24_07:10:04] Plan: 48 to add, 0 to change, 0 to destroy
+     [2025-10-24_07:10:04] SUCCESS: Plan resource count check
+     [2025-10-24_07:10:05] SUCCESS: tflint analysis
+     [2025-10-24_07:10:06] SUCCESS: Generated Terratest file
+     [2025-10-24_07:10:07] SUCCESS: Terratest execution
+     [2025-10-24_07:10:07] SUCCESS: All tests passed successfully!
+     ```
+
+---
+
+### What the Script Tests
+- **Prerequisites**: Verifies Terraform, `tflint`, and optional Go installation.
+- **Terraform Init**: Initializes the project without a backend to avoid AWS connectivity.
+- **Terraform Validate**: Checks HCL syntax and module references.
+- **Terraform Plan**: Generates a plan to verify resource counts (e.g., 12 Kafka + 3 MM2 nodes per env) and variable interpolation.
+- **tflint**: Ensures code quality (e.g., no unused variables, proper AWS resource attributes).
+- **Terratest**: Validates that modules for each environment (Dev, QA, Staging, Prod) are included in the plan and checks for expected resource counts.
+
+---
+
+### Troubleshooting
+- **Terraform Validate Fails**: Check for syntax errors or missing module files. Ensure `templates/` and `modules/` are correctly structured.
+- **Terraform Plan Fails**: If it attempts AWS API calls, ensure credentials are unset (`unset AWS_ACCESS_KEY_ID`). Errors indicate configuration issues (e.g., invalid AMI ID).
+- **tflint Warnings**: Address warnings (e.g., missing tags) or update `.tflint.hcl` to ignore specific rules.
+- **Terratest Skipped**: Install Go or skip by commenting out `run_terratest`.
+- **Resource Count Mismatch**: Verify `num_nodes=12` and `mm2_num_nodes=3` in `variables.tf`.
+
+---
+
+### Advanced Testing with Localstack (Optional)
+If you want to simulate AWS resource creation:
+1. **Install Localstack**:
+   ```bash
+   pip install localstack
+   docker pull localstack/localstack
+   ```
+2. **Start Localstack**:
+   ```bash
+   localstack start -d
+   ```
+3. **Update `main.tf`**:
+   Add mock provider configuration:
+   ```hcl
+   provider "aws" {
+     region                      = "us-east-1"
+     access_key                  = "mock_access_key"
+     secret_key                  = "mock_secret_key"
+     skip_credentials_validation = true
+     skip_requesting_account_id  = true
+     endpoints {
+       ec2  = "http://localhost:4566"
+       s3   = "http://localhost:4566"
+       elb  = "http://localhost:4566"
+     }
+   }
+   ```
+4. **Run Terraform**:
+   ```bash
+   terraform init
+   terraform plan
+   ```
+5. **Limitations**: Localstack may not fully support `aws_lb` (NLB) or complex VPC setups. Use for basic validation only.
+
+---
+
+### Enhancements
+1. **Expand Terratest**:
+   - Add tests for specific outputs (e.g., `nlb_dns` format, IP counts).
+   - Example:
+     ```go
+     assert.Equal(t, 12, len(terraform.GetOutputList(t, terraformOptions, "kafka_node_ips.dev")), "Dev should have 12 Kafka nodes")
+     ```
+2. **Add tfsec**:
+   - Install: `curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash`.
+   - Run: `tfsec .` to check for security issues (e.g., overly permissive security groups).
+3. **CI/CD Integration**:
+   - Add to GitHub Actions:
+     ```yaml
+     name: Test Terraform
+     on: [push]
+     jobs:
+       test:
+         runs-on: ubuntu-latest
+         steps:
+         - uses: actions/checkout@v3
+         - uses: hashicorp/setup-terraform@v2
+         - run: ./test_terraform_locally.sh
+     ```
+4. **Mock S3**:
+   - Create a local file for `kafka_3.9.0.tgz` and update `s3_bucket` to a local path for testing:
+     ```hcl
+     variable "s3_bucket" { default = "/tmp/mock-s3" }
+     ```
+
+---
+
+### Notes
+- **No AWS Connectivity**: The script avoids AWS API calls by using `terraform validate`, `plan` without credentials, and `tflint`. Terratest runs a plan without applying.
+- **Scaling Validation**: Add a test cluster to `variables.tf` (e.g., `cluster-5`) and re-run to ensure scalability.
+- **Limitations**: These tests validate configuration, not runtime behavior (e.g., Kafka replication). Use the previous `test_kafka_setup.sh` for runtime tests post-deployment.
+- **Diagram**: If you want a visual, I can generate a text-based diagram of the module structure:
+  ```
+  main.tf
+  ├── kafka_cluster (for each env)
+  │   ├── network (VPC, subnets, NAT)
+  │   ├── instance (Kafka EC2s)
+  │   └── nlb (9092, 9093)
+  ├── mm2_cluster (for each env)
+  │   └── instance (MM2 EC2s)
+  ```
+
+If you need a specific test case (e.g., validate NLB port configuration) or help with Localstack setup, let me know!
