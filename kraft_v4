@@ -1,727 +1,428 @@
-On aws using terraform create a 12 node of kafka kraft 3.9 cluster
-Each az should have 4 nodes, kafka clients should run on 12 nodes and kafka controllers on 3 nodes.
-Use sasl ssl and with all the connections
-Use 6 ebs 1tb each call them local_disks 01 to 06
-Application should be installed on local_disks01 and other app data on rest of the disks
-Install java python and kafka from s3
-Should have envs dev qa staging and prods
-Should also have mirrormake running on separate cluster of 4 nodes
-Keep all module and properties files in structured and properties files separate and dont update with with CAT EOF, HAVE THEM SEPERATE
-Provide detailed infostructure and test plan and readme
+# Terraform Project Structure for Kafka KRaft Cluster
 
-
-# Kafka KRaft Cluster Infrastructure on AWS with Terraform
-
-This document provides a complete, production-ready Terraform-based infrastructure for deploying a 12-node Apache Kafka 3.9.0 KRaft cluster on AWS, using SASL/SSL for authentication and encryption across all connections (including controller and inter-broker). The setup includes:
-
-- **12 Kafka brokers** in KRaft mode, distributed across 3 Availability Zones (AZs) with 4 nodes per AZ (e.g., us-east-1a, us-east-1b, us-east-1c).
-- **3 dedicated controller roles** assigned to one node per AZ (brokers can act as controllers in KRaft; here, we designate 3 brokers as combined controller-brokers for quorum).
-- **SASL/SSL enabled** for all internal (inter-broker, controller) and external (client) connections. Uses SCRAM-SHA-256 for auth and mutual TLS.
-- **Storage**: Each node has 6 x 1TB EBS gp3 volumes (named `local_disks01` to `local_disks06` via tags). `local_disks01` mounts to `/app` for application binaries; the remaining 5 mount to `/data/kafka{01-05}` for Kafka data/logs.
-- **Installation**: Java 11 (OpenJDK), Python 3.12, and Kafka 3.9.0 downloaded from private S3 buckets during instance bootstrap (via user data/cloud-init).
-- **Environments**: Support for `dev`, `qa`, `staging`, `prod` via separate `.tfvars` files and Terraform workspaces.
-- **MirrorMaker2 (MM2)**: Separate 4-node cluster (1 per AZ + 1 extra for redundancy) for replication, also with SASL/SSL.
-- **Networking**: VPC with public/private subnets, security groups for Kafka ports (9092 client, 9093 controller, 9094 inter-broker), NLB for external access.
-- **Monitoring/Logging**: Basic CloudWatch integration; assumes external tools like Prometheus for advanced metrics.
-- **Modular Structure**: Reusable modules for EC2 instances, EBS, networking, etc. Properties files are separate YAML/INI files (not inlined with `cat <<EOF`); referenced via `templatefile()` in user data.
-- **Security**: IAM roles for S3 access, KMS for SSL keys, least-privilege policies.
-
-## Prerequisites
-- AWS account with admin privileges.
-- Terraform 1.5+ installed.
-- AWS CLI configured (`aws configure`).
-- Private S3 buckets: `kafka-artifacts-${env}` containing:
-  - `kafka_3.9.0.tgz` (official Kafka tarball).
-  - `openjdk-11.0.XX_linux-x64_bin.tar.gz`.
-  - `python-3.12.XX-amd64.tgz`.
-  - SSL certs: `kafka.server.keystore.jks`, `kafka.client.truststore.jks`, `ca-cert.pem` (generated via `keytool` or cert-manager).
-- Generate JAAS config and Kafka properties offline (samples provided below).
-- Git for version control.
+Below is a complete, structured Terraform project for deploying a 12-node Kafka KRaft 3.9 cluster on AWS. I've rewritten and organized the code for clarity, modularity, and best practices. The project is self-contained under a directory like `tf-kafka-user-data`.
 
 ## Directory Structure
 ```
-kafka-terraform/
-├── README.md                 # This file
-├── versions.tf               # Provider constraints
-├── backend.tf                # S3 backend for state
-├── environments/             # Env-specific configs
-│   ├── dev.tfvars
-│   ├── qa.tfvars
-│   ├── staging.tfvars
-│   └── prod.tfvars
-├── modules/                  # Reusable Terraform modules
-│   ├── vpc/                  # VPC + subnets + NLB
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── ec2-broker/           # Kafka broker EC2 module
-│   │   ├── main.tf
-│   │   ├── user-data.tpl     # Cloud-init template
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── ec2-controller/       # Controller-specific (subset of broker)
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── ebs-volumes/          # EBS attachment module
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── mm2-cluster/          # MirrorMaker2 cluster module
-│   │   ├── main.tf
-│   │   ├── user-data.tpl
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   └── s3-artifacts/         # S3 setup for installs
-│       ├── main.tf
-│       ├── variables.tf
-│       └── outputs.tf
-├── configs/                  # Separate config files (YAML/INI)
-│   ├── kafka/                # Kafka properties
-│   │   ├── server.properties # Broker config
-│   │   ├── controller.properties # Controller-specific overrides
-│   │   ├── client.properties # Client config
-│   │   └── mm2.properties    # MirrorMaker2 config
-│   ├── security/             # Auth/SSL
-│   │   ├── kafka_jaas.conf   # JAAS for SASL
-│   │   └── ssl.properties    # SSL keystore props
-│   └── install/              # Bootstrap scripts
-│       ├── install-kafka.sh
-│       ├── install-java.sh
-│       └── install-python.sh
-├── main.tf                   # Root module: orchestrates everything
-├── variables.tf              # Global vars
-├── outputs.tf                # Outputs (e.g., NLB DNS)
-├── test-plan.md              # Testing guide
-└── .gitignore                # Standard ignores
+tf-kafka-user-data/
+├── main.tf                  # Main Terraform configuration (providers, locals, resources)
+├── variables.tf             # Variable definitions
+├── outputs.tf               # Output definitions
+└── templates/               # Template files for configurations
+    ├── server.properties.tftpl  # Kafka server properties template
+    ├── user_data.sh.tftpl       # User data script template for instance initialization
+    └── kafka.service.tftpl      # Systemd service file template for Kafka
 ```
 
-## Key Terraform Files
+## Rewritten Code Files
 
-### versions.tf
+### main.tf
 ```hcl
-terraform {
-  required_version = ">= 1.5.0"
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+provider "aws" {
+  region = "us-west-2"
+}
+
+locals {
+  azs = ["a", "b", "c"]
+  controller_node_ids = [1, 5, 9]
+  nodes = {
+    for i in range(1, 13) : tostring(i) => {
+      node_id       = i
+      hostname      = i == 11 ? "dnaarc-cat-Kafkal-nll" : format("dnaarc-cat-Kafkal-n%d", i)
+      fqdn          = format("%s.us-west-2.aws.cloud.bofa", i == 11 ? "dnaarc-cat-Kafkal-nll" : format("dnaarc-cat-Kafkal-n%d", i))
+      az_index      = floor((i - 1) / 4)
+      subnet_id     = var.subnet_ids[floor((i - 1) / 4)]
+      rack          = format("us-west-2%s", local.azs[floor((i - 1) / 4)])
+      is_controller = contains(local.controller_node_ids, i)
     }
   }
-  backend "s3" {
-    bucket         = "terraform-state-${var.environment}"
-    key            = "kafka/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "terraform-locks"
+  controller_quorum_voters = join(",", [
+    for id in local.controller_node_ids : format("%d@%s:9093", id, local.nodes[tostring(id)].fqdn)
+  ])
+}
+
+data "aws_secretsmanager_secret" "keystore" {
+  name = var.keystore_secret_name
+}
+
+data "aws_secretsmanager_secret_version" "keystore" {
+  secret_id = data.aws_secretsmanager_secret.keystore.id
+}
+
+data "aws_secretsmanager_secret" "key" {
+  name = var.key_secret_name
+}
+
+data "aws_secretsmanager_secret_version" "key" {
+  secret_id = data.aws_secretsmanager_secret.key.id
+}
+
+data "aws_secretsmanager_secret" "truststore" {
+  name = var.truststore_secret_name
+}
+
+data "aws_secretsmanager_secret_version" "truststore" {
+  secret_id = data.aws_secretsmanager_secret.truststore.id
+}
+
+data "cloudinit_config" "kafka" {
+  for_each = local.nodes
+
+  gzip          = false
+  base64_encode = false
+
+  part {
+    filename     = "server.properties"
+    content_type = "text/plain"
+    content      = templatefile("${path.module}/templates/server.properties.tftpl", {
+      node_id                   = each.value.node_id
+      is_controller             = each.value.is_controller
+      fqdn                      = each.value.fqdn
+      controller_quorum_voters  = local.controller_quorum_voters
+      broker_rack               = each.value.rack
+      keystore_password         = data.aws_secretsmanager_secret_version.keystore.secret_string
+      key_password              = data.aws_secretsmanager_secret_version.key.secret_string
+      truststore_password       = data.aws_secretsmanager_secret_version.truststore.secret_string
+    })
+  }
+
+  part {
+    filename     = "/etc/systemd/system/kafka.service"
+    content_type = "text/plain"
+    content      = templatefile("${path.module}/templates/kafka.service.tftpl", {})
+  }
+
+  part {
+    content_type = "text/x-shellscript"
+    content      = templatefile("${path.module}/templates/user_data.sh.tftpl", {
+      fqdn                 = each.value.fqdn
+      java_s3_path         = var.java_s3_path
+      python_s3_path       = var.python_s3_path
+      kafka_s3_path        = var.kafka_s3_path
+      certs_s3_path        = var.certs_s3_path
+      config_s3_bucket     = var.config_s3_bucket
+    })
+  }
+}
+
+resource "aws_launch_template" "kafka" {
+  for_each = local.nodes
+
+  name                   = "kafka-node-${each.value.node_id}"
+  image_id               = var.ami_id
+  instance_type          = var.instance_type
+  vpc_security_group_ids = [var.security_group_id]
+  iam_instance_profile {
+    name = var.iam_instance_profile_name
+  }
+  user_data = base64encode(data.cloudinit_config.kafka[each.key].rendered)
+
+  block_device_mappings {
+    device_name = "/dev/sdf"
+
+    ebs {
+      volume_size           = 100
+      volume_type           = "gp3"
+      delete_on_termination = true
+      throughput            = 125
+      iops                  = 3000
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_group" "kafka" {
+  for_each = local.nodes
+
+  name                  = "kafka-node-${each.value.node_id}-asg"
+  min_size              = 1
+  max_size              = 1
+  desired_capacity      = 1
+  vpc_zone_identifier   = [each.value.subnet_id]
+  protect_from_scale_in = false
+
+  launch_template {
+    id      = aws_launch_template.kafka[each.key].id
+    version = aws_launch_template.kafka[each.key].latest_version
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "kafka-node-${each.value.node_id}"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 ```
 
-### backend.tf
+### variables.tf
 ```hcl
-# Empty; backend config is in versions.tf for simplicity
-```
-
-### variables.tf (Global)
-```hcl
-variable "environment" {
-  description = "Environment (dev, qa, staging, prod)"
-  type        = string
-  validation {
-    condition     = contains(["dev", "qa", "staging", "prod"], var.environment)
-    error_message = "Environment must be dev, qa, staging, or prod."
-  }
+variable "subnet_ids" {
+  description = "List of subnet IDs, one per AZ (a, b, c)"
+  type        = list(string)
 }
 
-variable "region" {
-  description = "AWS Region"
+variable "security_group_id" {
+  description = "Security group ID for Kafka instances"
   type        = string
-  default     = "us-east-1"
 }
 
-variable "vpc_cidr" {
-  description = "VPC CIDR"
+variable "ami_id" {
+  description = "AMI ID for the instances"
   type        = string
-  default     = "10.0.0.0/16"
 }
 
 variable "instance_type" {
-  description = "EC2 instance type"
+  description = "Instance type for Kafka nodes"
   type        = string
-  default     = "m5.4xlarge"  # Adjust for env (e.g., smaller for dev)
+  default     = "m5.large"
 }
 
-variable "s3_bucket_prefix" {
-  description = "S3 bucket prefix for artifacts"
+variable "iam_instance_profile_name" {
+  description = "IAM instance profile name for S3 access"
   type        = string
-  default     = "kafka-artifacts"
 }
 
-# ... other vars: key_name, kafka_version="3.9.0", etc.
-```
-
-### environments/dev.tfvars
-```hcl
-environment = "dev"
-instance_type = "m5.large"  # Smaller for dev
-num_azs = 3
-```
-
-### environments/prod.tfvars
-```hcl
-environment = "prod"
-instance_type = "m5.8xlarge"
-auto_scaling = true  # Enable ASG for prod
-```
-
-### modules/vpc/main.tf
-```hcl
-resource "aws_vpc" "main" {
-  cidr_block = var.vpc_cidr
-  tags = {
-    Name        = "${var.environment}-kafka-vpc"
-    Environment = var.environment
-  }
+variable "java_s3_path" {
+  description = "S3 path to Java tar.gz"
+  type        = string
 }
 
-resource "aws_subnet" "private" {
-  count = var.num_azs
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
-  tags = {
-    Name        = "${var.environment}-private-${count.index + 1}"
-    Environment = var.environment
-  }
+variable "python_s3_path" {
+  description = "S3 path to Python tar.gz"
+  type        = string
 }
 
-resource "aws_network_load_balancer" "kafka_nlb" {
-  name               = "${var.environment}-kafka-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnets            = aws_subnet.public[*].id  # Assume public subnets too
-
-  # Target groups for 9092 (client), 9093 (controller)
+variable "kafka_s3_path" {
+  description = "S3 path to Kafka 3.9 tar.gz"
+  type        = string
 }
 
-# Security Groups
-resource "aws_security_group" "kafka_sg" {
-  vpc_id = aws_vpc.main.id
-  ingress {
-    from_port   = 9092  # Client
-    to_port     = 9092
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr]
-  }
-  ingress {
-    from_port   = 9093  # Controller
-    to_port     = 9093
-    protocol    = "tcp"
-    self        = true   # Inter-controller
-  }
-  ingress {
-    from_port   = 9094  # Inter-broker
-    to_port     = 9094
-    protocol    = "tcp"
-    self        = true
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  tags = {
-    Name = "${var.environment}-kafka-sg"
-  }
-}
-```
-
-### modules/ec2-broker/main.tf
-```hcl
-data "template_file" "user_data" {
-  template = file("${path.module}/user-data.tpl")
-  vars = {
-    s3_bucket      = var.s3_bucket
-    kafka_version  = var.kafka_version
-    environment    = var.environment
-    # Pass props paths for template
-  }
+variable "certs_s3_path" {
+  description = "S3 path to certs tar.gz (containing keystore.jks, truststore.jks)"
+  type        = string
 }
 
-resource "aws_launch_template" "broker_lt" {
-  name_prefix   = "${var.environment}-broker-"
-  image_id      = data.aws_ami.amazon_linux.id.id  # Amazon Linux 2023
-  instance_type = var.instance_type
-  key_name      = var.key_name
-  vpc_security_group_ids = [var.kafka_sg_id]
-
-  user_data = base64encode(data.template_file.user_data.rendered)
-
-  block_device_mappings {
-    device_name = "/dev/xvda"
-    ebs {
-      volume_size = 20  # Root
-      volume_type = "gp3"
-    }
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name        = "${var.environment}-broker-${count.index}"
-      Role        = "broker"
-      Environment = var.environment
-    }
-  }
+variable "config_s3_bucket" {
+  description = "S3 bucket for shared config like cluster_id"
+  type        = string
 }
 
-resource "aws_autoscaling_group" "broker_asg" {
-  name                = "${var.environment}-broker-asg"
-  vpc_zone_identifier = var.private_subnet_ids
-  min_size            = 12
-  max_size            = 12
-  desired_capacity    = 12
-  health_check_type   = "ELB"
-  launch_template {
-    id      = aws_launch_template.broker_lt.id
-    version = "$Latest"
-  }
-
-  # Distribute 4 per AZ
-  tag {
-    key                 = "AvailabilityZone"
-    value               = "balanced"
-    propagate_at_launch = true
-  }
+variable "keystore_secret_name" {
+  description = "Name of the AWS Secrets Manager secret for keystore password"
+  type        = string
 }
 
-# Designate 3 as controllers (one per AZ) via tag
-resource "aws_instance" "controller" {
-  count                       = 3
-  ami                         = data.aws_ami.amazon_linux.id.id
-  instance_type               = var.instance_type
-  subnet_id                   = var.private_subnet_ids[count.index % 3]
-  vpc_security_group_ids      = [var.kafka_sg_id]
-  associate_public_ip_address = false
-  key_name                    = var.key_name
-  user_data                   = base64encode(templatefile("${path.module}/user-data.tpl", { role = "controller" }))  # Override for controller
-
-  tags = {
-    Name        = "${var.environment}-controller-${count.index + 1}"
-    Role        = "controller"
-    Controller  = "true"
-    Environment = var.environment
-  }
-}
-```
-
-### modules/ec2-broker/user-data.tpl (Cloud-Init Template)
-```yaml
-#cloud-config
-package_update: true
-package_upgrade: true
-
-write_files:
-  - path: /etc/kafka/server.properties
-    content: |
-      ${templatefile("${path.module}/../../configs/kafka/server.properties", { bootstrap_servers = var.bootstrap_servers, ssl_enabled = true })}
-    permissions: '0644'
-    owner: kafka:kafka
-
-  - path: /etc/kafka/controller.properties
-    content: |
-      ${templatefile("${path.module}/../../configs/kafka/controller.properties", { node_id = var.node_id })}
-    permissions: '0644'
-    owner: kafka:kafka
-
-  - path: /etc/kafka/kafka_jaas.conf
-    content: |
-      ${file("${path.module}/../../configs/security/kafka_jaas.conf")}
-    permissions: '0600'
-    owner: kafka:kafka
-
-  - path: /etc/kafka/ssl.properties
-    content: |
-      ${file("${path.module}/../../configs/security/ssl.properties")}
-    permissions: '0644'
-    owner: kafka:kafka
-
-runcmd:
-  - aws s3 cp s3://${s3_bucket}/kafka_${kafka_version}.tgz /tmp/
-  - tar -xzf /tmp/kafka_${kafka_version}.tgz -C /app/kafka --strip-components=1
-  - chown -R kafka:kafka /app/kafka
-  - aws s3 cp s3://${s3_bucket}/openjdk-*.tar.gz /tmp/
-  - tar -xzf /tmp/openjdk-*.tar.gz -C /usr/local/
-  - ln -s /usr/local/jdk* /usr/local/java
-  - aws s3 cp s3://${s3_bucket}/python-*.tgz /tmp/
-  - tar -xzf /tmp/python-*.tgz -C /usr/local/
-  - ln -s /usr/local/Python* /usr/local/python
-  - /app/install/install-kafka.sh  # Mount/format EBS first
-  - /app/install/install-java.sh
-  - /app/install/install-python.sh
-  - systemctl enable kafka
-  - systemctl start kafka
-
-# EBS mounting (via script)
-- mkfs.xfs /dev/nvme1n1 && mount /dev/nvme1n1 /app  # local_disks01
-- for i in {2..6}; do mkfs.xfs /dev/nvme${i}n1 && mkdir -p /data/kafka$((i-1)) && mount /dev/nvme${i}n1 /data/kafka$((i-1)); done
-```
-
-### modules/ebs-volumes/main.tf
-```hcl
-resource "aws_ebs_volume" "local_disks" {
-  count             = 6
-  availability_zone = var.az
-  size              = 1024  # 1TB
-  type              = "gp3"
-  encrypted         = true
-  kms_key_id        = var.kms_key_id
-
-  tags = {
-    Name        = "${var.environment}-local_disks${format("%02d", count.index + 1)}"
-    Environment = var.environment
-    InstanceId  = var.instance_id  # Attach to specific instance
-  }
+variable "key_secret_name" {
+  description = "Name of the AWS Secrets Manager secret for key password"
+  type        = string
 }
 
-resource "aws_volume_attachment" "ebs_att" {
-  count       = 6
-  device_name = "/dev/nvme${count.index + 1}n1"  # NVMe mapping
-  volume_id   = aws_ebs_volume.local_disks[count.index].id
-  instance_id = var.instance_id
-}
-```
-
-### configs/kafka/server.properties (Separate File)
-```properties
-# Broker config for KRaft
-process.roles=broker,controller  # For controller nodes; else just 'broker'
-node.id=${node_id}
-controller.quorum.voters=1@broker-1.internal:9093,2@broker-2.internal:9093,3@broker-3.internal:9093
-
-listeners=CONTROLLER://0.0.0.0:9093,SSL://0.0.0.0:9092,SASL_SSL://0.0.0.0:9094
-advertised.listeners=SSL://broker-${node_id}.${var.environment}.internal:9092,SASL_SSL://broker-${node_id}.${var.environment}.internal:9094
-listener.security.protocol.map=CONTROLLER:SASL_SSL,SSL:SASL_SSL,SASL_SSL:SASL_SSL
-
-ssl.keystore.location=/etc/kafka/kafka.server.keystore.jks
-ssl.keystore.password=changeit
-ssl.key.password=changeit
-ssl.truststore.location=/etc/kafka/kafka.client.truststore.jks
-ssl.truststore.password=changeit
-
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-256
-sasl.enabled.mechanisms=SCRAM-SHA-256
-inter.broker.listener.name=SASL_SSL
-
-log.dirs=/data/kafka01,/data/kafka02,/data/kafka03,/data/kafka04,/data/kafka05
-num.network.threads=8
-num.io.threads=16
-# ... other standard props: auto.create.topics.enable=false, etc.
-```
-
-### configs/kafka/client.properties
-```properties
-security.protocol=SASL_SSL
-sasl.mechanism=SCRAM-SHA-256
-ssl.truststore.location=/etc/kafka/kafka.client.truststore.jks
-ssl.truststore.password=changeit
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="client" password="client-secret";
-bootstrap.servers=${bootstrap_servers}
-```
-
-### configs/kafka/controller.properties
-```properties
-# Overrides for controllers
-process.roles=controller
-controller.listener.names=CONTROLLER
-listeners=CONTROLLER://0.0.0.0:9093
-```
-
-### configs/kafka/mm2.properties
-```properties
-# MirrorMaker2 config
-clusters=source,target
-source.bootstrap.servers=source-brokers:9092
-target.bootstrap.servers=target-brokers:9092
-# Replication policies, etc.
-security.protocol=SASL_SSL
-# ... similar SSL/SASL as above
-```
-
-### configs/security/kafka_jaas.conf
-```conf
-KafkaServer {
-  org.apache.kafka.common.security.scram.ScramLoginModule required
-  username="admin"
-  password="admin-secret"
-  mechanism="SCRAM-SHA-256";
-};
-
-Client {
-  org.apache.kafka.common.security.scram.ScramLoginModule required
-  username="client"
-  password="client-secret";
-};
-```
-
-### configs/security/ssl.properties
-```properties
-ssl.protocol=TLSv1.2
-ssl.enabled.protocols=TLSv1.2,TLSv1.3
-ssl.endpoint.identification.algorithm=
-```
-
-### modules/mm2-cluster/main.tf (Similar to Broker, but 4 nodes)
-```hcl
-# Analogous to ec2-broker, but:
-resource "aws_autoscaling_group" "mm2_asg" {
-  # ... min_size=4, etc.
-  launch_template {
-    # User data with mm2.properties
-  }
-}
-
-# User data downloads Kafka again, runs MM2 as service
-```
-
-### modules/s3-artifacts/main.tf
-```hcl
-resource "aws_s3_bucket" "artifacts" {
-  bucket = "${var.s3_bucket_prefix}-${var.environment}"
-}
-
-resource "aws_s3_object" "kafka" {
-  bucket = aws_s3_bucket.artifacts.id
-  key    = "kafka_3.9.0.tgz"
-  source = "path/to/local/kafka_3.9.0.tgz"  # Upload locally
-  # Similar for Java/Python/SSL files
-}
-
-resource "aws_s3_bucket_policy" "ec2_access" {
-  bucket = aws_s3_bucket.artifacts.id
-  policy = jsonencode({
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { AWS = var.ec2_role_arn }
-      Action    = ["s3:GetObject"]
-      Resource  = "${aws_s3_bucket.artifacts.arn}/*"
-    }]
-  })
-}
-```
-
-### main.tf (Root)
-```hcl
-provider "aws" {
-  region = var.region
-}
-
-module "s3_artifacts" {
-  source = "./modules/s3-artifacts"
-  environment = var.environment
-}
-
-module "vpc" {
-  source = "./modules/vpc"
-  environment = var.environment
-  vpc_cidr = var.vpc_cidr
-  num_azs = 3
-}
-
-module "ebs_volumes" {
-  source = "./modules/ebs-volumes"
-  for_each = { for idx, inst in aws_instance.kafka_brokers : idx => inst.id }
-  environment = var.environment
-  instance_id = each.value
-  az = element(data.aws_availability_zones.available.names, each.key % 3)
-  kms_key_id = aws_kms_key.kafka.arn
-}
-
-module "ec2_broker" {
-  source = "./modules/ec2-broker"
-  environment = var.environment
-  kafka_sg_id = module.vpc.kafka_sg_id
-  private_subnet_ids = module.vpc.private_subnet_ids
-  s3_bucket = module.s3_artifacts.bucket_name
-  # ... other vars
-  depends_on = [module.s3_artifacts]
-}
-
-module "mm2_cluster" {
-  source = "./modules/mm2-cluster"
-  environment = var.environment
-  # ... similar
-}
-
-# IAM Role for EC2
-resource "aws_iam_role" "kafka_role" {
-  name = "${var.environment}-kafka-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "s3_policy" {
-  role       = aws_iam_role.kafka_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
-}
-
-# KMS for EBS/SSL
-resource "aws_kms_key" "kafka" {
-  description = "KMS for Kafka EBS and SSL"
+variable "truststore_secret_name" {
+  description = "Name of the AWS Secrets Manager secret for truststore password"
+  type        = string
 }
 ```
 
 ### outputs.tf
 ```hcl
-output "kafka_bootstrap_servers" {
-  value = "kafka-nlb.${var.environment}.elb.us-east-1.amazonaws.com:9092"
-  description = "Bootstrap servers for clients"
-}
-
-output "mm2_status" {
-  value = module.mm2_cluster.health_check_url
+output "asg_names" {
+  description = "Names of the Auto Scaling Groups"
+  value       = { for k, v in aws_autoscaling_group.kafka : k => v.name }
 }
 ```
 
-### configs/install/install-kafka.sh (Separate Script, Uploaded to S3 or Embedded)
-```bash
+### templates/server.properties.tftpl
+```
+process.roles=${is_controller ? "broker,controller" : "broker"}
+node.id=${node_id}
+controller.quorum.voters=${controller_quorum_voters}
+
+listeners=SASL_SSL://0.0.0.0:9092${is_controller ? ",CONTROLLER://0.0.0.0:9093" : ""}
+advertised.listeners=SASL_SSL://${fqdn}:9092
+listener.security.protocol.map=SASL_SSL:SASL_SSL,CONTROLLER:SASL_SSL
+
+inter.broker.listener.name=SASL_SSL
+controller.listener.names=CONTROLLER
+control.plane.listener.name=CONTROLLER
+
+sasl.enabled.mechanisms=SCRAM-SHA-512
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.mechanism.controller.protocol=SCRAM-SHA-512
+
+authorizer.class.name=org.apache.kafka.server.authorizer.AclAuthorizer
+allow.everyone.if.no.acl.found=true
+super.users=User:admin  # Adjust as needed; initial setup required for secure bootstrap
+
+ssl.keystore.location=/opt/kafka/config/certs/keystore.jks
+ssl.keystore.password=${keystore_password}
+ssl.key.password=${key_password}
+ssl.truststore.location=/opt/kafka/config/certs/truststore.jks
+ssl.truststore.password=${truststore_password}
+ssl.client.auth=required
+ssl.enabled.protocols=TLSv1.2,TLSv1.3
+ssl.keystore.type=JKS
+ssl.truststore.type=JKS
+
+broker.rack=${broker_rack}
+log.dirs=/opt/kafka/logs
+
+num.network.threads=6
+num.io.threads=12
+socket.send.buffer.bytes=102400
+socket.receive.buffer.bytes=102400
+socket.request.max.bytes=104857600
+num.partitions=1
+num.recovery.threads.per.data.dir=1
+offsets.topic.replication.factor=3
+transaction.state.log.replication.factor=3
+transaction.state.log.min.isr=2
+log.retention.hours=168
+log.segment.bytes=1073741824
+log.retention.check.interval.ms=300000
+
+auto.create.topics.enable=false
+delete.topic.enable=true
+group.initial.rebalance.delay.ms=3000
+offsets.retention.minutes=1440
+offsets.topic.num.partitions=50
+offsets.topic.segment.bytes=104857600
+zookeeper.session.timeout.ms=18000  # Though KRaft, some configs might still apply or be placeholders
+background.threads=10
+num.replica.fetchers=2
+replica.fetch.max.bytes=1048576
+replica.fetch.response.max.bytes=10485760
+```
+
+### templates/user_data.sh.tftpl
+```
 #!/bin/bash
-# Format and mount data dirs if not done
-for dir in /data/kafka*; do
-  if ! mountpoint -q "$dir"; then
-    mkfs.xfs "${dir/dev}"  # Pseudo
-    mount "${dir/dev}" "$dir"
-  fi
-  chown -R kafka:kafka "$dir"
-done
+set -ex
 
-# Format /app if needed (already in user-data)
+# Set hostname
+hostnamectl set-hostname ${fqdn}
+echo "preserve_hostname: true" | tee -a /etc/cloud/cloud.cfg
 
-# Systemd service
-cat > /etc/systemd/system/kafka.service << 'EOF'
+# Mount and format EBS volume if necessary
+DEVICE=/dev/xvdf  # AWS maps /dev/sdf to /dev/xvdf
+MOUNT_DIR=/opt/kafka/logs
+
+if ! blkid $DEVICE; then
+  mkfs -t ext4 $DEVICE
+fi
+
+mkdir -p $MOUNT_DIR
+mount $DEVICE $MOUNT_DIR || true  # In case already mounted
+echo "$DEVICE $MOUNT_DIR ext4 defaults,nofail 0 2" >> /etc/fstab
+
+# Download and install Java
+aws s3 cp ${java_s3_path} /opt/java.tar.gz
+mkdir -p /opt/java
+tar -xzf /opt/java.tar.gz -C /opt/java --strip-components=1
+rm /opt/java.tar.gz
+export JAVA_HOME=/opt/java
+echo "export JAVA_HOME=/opt/java" >> /etc/profile.d/java.sh
+echo "export PATH=$PATH:$JAVA_HOME/bin" >> /etc/profile.d/java.sh
+
+# Download and install Python
+aws s3 cp ${python_s3_path} /opt/python.tar.gz
+mkdir -p /opt/python
+tar -xzf /opt/python.tar.gz -C /opt/python --strip-components=1
+rm /opt/python.tar.gz
+echo "export PATH=/opt/python/bin:$PATH" >> /etc/profile.d/python.sh
+
+# Download and install Kafka
+aws s3 cp ${kafka_s3_path} /opt/kafka.tar.gz
+tar -xzf /opt/kafka.tar.gz -C /opt
+mv /opt/apache-kafka-3.9.0 /opt/kafka  # Adjust version if needed
+rm /opt/kafka.tar.gz
+
+# Download certs
+aws s3 cp ${certs_s3_path} /opt/certs.tar.gz
+mkdir -p /opt/kafka/config/certs
+tar -xzf /opt/certs.tar.gz -C /opt/kafka/config/certs
+rm /opt/certs.tar.gz
+
+# Handle cluster ID
+cd /opt/kafka
+CLUSTER_ID_PATH="s3://${config_s3_bucket}/kafka_cluster_id"
+if ! aws s3 cp $CLUSTER_ID_PATH ./cluster_id 2>/dev/null; then
+  bin/kafka-storage.sh random-uuid > cluster_id
+  aws s3 cp cluster_id $CLUSTER_ID_PATH
+fi
+
+# Format storage (assuming /opt/kafka/logs is log.dirs)
+bin/kafka-storage.sh format --ignore-formatted --cluster-id $(cat cluster_id) --config config/server.properties
+
+# Start Kafka
+systemctl daemon-reload
+systemctl enable kafka
+systemctl start kafka
+```
+
+### templates/kafka.service.tftpl
+```
 [Unit]
-Description=Apache Kafka
+Description=Apache Kafka Server
 After=network.target
 
 [Service]
 Type=simple
-User=kafka
-ExecStart=/app/kafka/bin/kafka-server-start.sh /etc/kafka/server.properties
-ExecStop=/app/kafka/bin/kafka-server-stop.sh
-Restart=always
+User=root
+Group=root
+WorkingDirectory=/opt/kafka
+Environment="JAVA_HOME=/opt/java"
+ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
+ExecStop=/opt/kafka/bin/kafka-server-stop.sh
+Restart=on-failure
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable kafka
 ```
 
-Similar scripts for `install-java.sh` (set JAVA_HOME, PATH) and `install-python.sh` (pip install kafka-python, etc.).
+## Terraform Commands
+To deploy this project, navigate to the `tf-kafka-user-data/` directory and run the following commands in sequence. Ensure you have AWS credentials configured (e.g., via `aws configure`) and Terraform installed.
 
-For MM2: `install-mirrormaker.sh` with `kafka-mirror-maker.sh --config /etc/kafka/mm2.properties`.
-
-## Deployment Instructions (README Excerpt)
-1. **Init**: `terraform init -backend-config="bucket=terraform-state-${environment}"` (per env).
-2. **Workspace**: `terraform workspace new ${environment}` or use `-var-file=environments/${environment}.tfvars`.
-3. **Plan**: `terraform plan -var-file=environments/${environment}.tfvars`.
-4. **Apply**: `terraform apply -var-file=environments/${environment}.tfvars`.
-5. **Upload Artifacts**: Before apply, `aws s3 sync local-artifacts/ s3://kafka-artifacts-${environment}/`.
-6. **Generate SSL/JAAS**: Use scripts like:
-   ```bash
-   keytool -keystore kafka.server.keystore.jks -alias kafka -validity 365 -genkey -keyalg RSA -storepass changeit
-   # Distribute to S3
+1. **Initialize Terraform** (downloads providers and modules):
    ```
-7. **Destroy**: `terraform destroy -var-file=...`.
+   terraform init
+   ```
 
-## Test Plan (test-plan.md)
-### Unit Tests (Terraform)
-- Use `terraform validate` and `tflint`.
-- Terratest: Go scripts to validate resources post-apply.
-  Example:
-  ```go
-  package test
+2. **Validate Configuration** (checks for syntax errors):
+   ```
+   terraform validate
+   ```
 
-  import (
-    "testing"
-    "github.com/gruntwork-io/terratest/modules/terraform"
-    "github.com/stretchr/testify/assert"
-  )
+3. **Format Code** (optional, for consistent styling):
+   ```
+   terraform fmt
+   ```
 
-  func TestKafkaCluster(t *testing.T) {
-    terraformOptions := &terraform.Options{
-      TerraformDir: "../",
-      Vars:         map[string]interface{}{"environment": "dev"},
-    }
-    defer terraform.Destroy(t, terraformOptions)
-    terraform.InitAndApply(t, terraformOptions)
+4. **Plan Deployment** (shows what changes will be made):
+   ```
+   terraform plan -var-file="your-vars.tfvars" -out=plan.tfplan
+   ```
+   - Replace `your-vars.tfvars` with a file containing your variable values (e.g., subnet_ids, ami_id, etc.).
 
-    // Assert 12 instances
-    instances := terraform.OutputList(t, terraformOptions, "ec2_instance_ids")
-    assert.Equal(t, 12, len(instances))
+5. **Apply Deployment** (creates resources):
+   ```
+   terraform apply plan.tfplan
+   ```
 
-    // Check security groups
-    sg := terraform.Output(t, terraformOptions, "kafka_sg_id")
-    // Validate ports via AWS SDK
-  }
-  ```
+6. **Destroy Resources** (when done, to clean up):
+   ```
+   terraform destroy -var-file="your-vars.tfvars"
+   ```
 
-### Integration Tests
-1. **Bootstrap Verification**:
-   - SSH to a broker: `ssh -i key.pem ec2-user@ip`.
-   - Check installs: `java -version`, `python --version`, `ls /app/kafka`.
-   - Verify mounts: `df -h | grep data`.
-
-2. **Kafka Functionality (KRaft)**:
-   - Use Kafka client (from S3 or local): `kafka-topics --bootstrap-server ${output.kafka_bootstrap_servers} --create --topic test --partitions 3 --replication-factor 3 --command-config client.properties`.
-   - Produce/Consume: Ensure SASL/SSL works (no auth errors).
-   - Controller health: `kafka-controller-listener --bootstrap-server ... --command-config client.properties`.
-   - Quorum check: Logs should show controllers elected.
-
-3. **Storage Tests**:
-   - Write to /app: Create file, verify persistence.
-   - Kafka data: Produce messages, check log.dirs usage via `du -sh /data/kafka*`.
-
-4. **MirrorMaker Tests**:
-   - Create source topic, replicate to target.
-   - Verify lag: `kafka-mirror-maker --consumer.config ... --describe`.
-
-5. **Security Tests**:
-   - Attempt unauth connection: Should fail.
-   - Network: `nc -zv broker-ip 9092` from VPC only.
-   - SSL: `openssl s_client -connect nlb:9092 -tls1_2` (verify cert).
-
-6. **Performance/Scalability**:
-   - Load test: Use `kafka-producer-perf-test` with 1M messages.
-   - Failover: Stop a controller, verify election (under 10s).
-   - AZ Failure: Simulate AZ outage, check replication.
-
-7. **Env-Specific**:
-   - Dev/QA: Smoke tests only.
-   - Staging/Prod: Full chaos engineering (e.g., Netflix Chaos Monkey integration).
-
-### Monitoring Tests
-- CloudWatch alarms: CPU >80%, EBS IOPS.
-- Logs: `/var/log/kafka/server.log` for errors.
-
-### Rollback/DR
-- `terraform apply` with scaled-down vars.
-- Backup: EBS snapshots via lifecycle policy.
-
-## Additional Considerations
-- **Cost Optimization**: Use Spot instances for non-prod; Savings Plans for prod.
-- **CI/CD**: GitHub Actions with `terraform plan` on PRs.
-- **Secrets Management**: Use AWS SSM for passwords (inject via user-data `aws ssm get-parameter`).
-- **Updates**: For Kafka upgrades, update S3 artifacts and re-apply (rolling ASG).
-- **Limitations**: No auto-healing for KRaft quorum loss; monitor closely.
-- **Extensions**: Add Prometheus exporter module; integrate with MSK for hybrid if needed.
-
-This setup is modular, scalable, and secure. For customizations, adjust vars/modules. Contact for clarifications!
+## Additional Notes
+- **Prerequisites**: Ensure the IAM instance profile has permissions for S3 read (for artifacts) and Secrets Manager read (for passwords). VPC, subnets, and security groups must exist.
+- **Customization**: Adjust instance_type, EBS volume settings, or Kafka configs as needed. The user_data script assumes an Amazon Linux-like AMI with `aws` CLI and `systemctl`.
+- **Security**: Passwords are fetched from AWS Secrets Manager at runtime for security.
+- **Testing**: After apply, check ASG instances in AWS Console and verify Kafka cluster health using Kafka tools.
