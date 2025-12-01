@@ -1,0 +1,3010 @@
+
+# 🏗️ Converting AWS Infrastructure to Terraform
+
+Perfect! Let's convert everything to Infrastructure as Code (IaC) using Terraform. I'll teach you Terraform step-by-step using your actual infrastructure.
+
+---
+
+## 📚 What is Terraform?
+
+**Plain English:**
+- Terraform = Recipe book for building infrastructure
+- Instead of clicking buttons or running bash commands, you write a **recipe** (code)
+- Terraform reads the recipe and builds everything for you
+- You can destroy and rebuild anytime - it's **reproducible**
+
+**Key Concepts:**
+```
+Provider    = Which cloud (AWS, Azure, Google)
+Resource    = Things you create (VPC, EC2, RDS)
+Data Source = Things that already exist (AMIs, AZs)
+Variable    = Values you can change (like function parameters)
+Output      = Values to display after creation (like return values)
+State       = Terraform's memory of what it built
+```
+
+---
+
+## 🎯 Terraform Project Structure
+
+```bash
+# Create directory structure
+mkdir -p techstore-terraform
+cd techstore-terraform
+
+# We'll create these files:
+techstore-terraform/
+├── main.tf              # Main infrastructure code
+├── variables.tf         # Input variables (parameters)
+├── outputs.tf           # Output values (what to display)
+├── provider.tf          # AWS configuration
+├── vpc.tf              # VPC and networking
+├── ec2.tf              # Web server
+├── rds.tf              # Database
+├── s3.tf               # Storage
+├── monitoring.tf       # CloudWatch
+├── terraform.tfvars    # Your specific values
+└── README.md           # Documentation
+```
+
+---
+
+## 🚀 Step 1: Provider Configuration
+
+**What this does:** Tells Terraform "we're using AWS in us-east-1"
+
+```bash
+cat > provider.tf <<'EOF'
+# Provider = Which cloud service we're using
+# Think of it as: "I want to build on AWS"
+
+terraform {
+  # Minimum Terraform version required
+  required_version = ">= 1.0"
+ 
+  # Required providers (plugins)
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"  # Use AWS provider version 5.x
+    }
+  }
+}
+
+# Configure the AWS Provider
+provider "aws" {
+  region = var.aws_region  # Which AWS region (us-east-1)
+ 
+  # Default tags applied to ALL resources
+  default_tags {
+    tags = {
+      Project     = "TechStore"
+      Environment = "Production"
+      ManagedBy   = "Terraform"
+      Owner       = "CloudOps-Team"
+    }
+  }
+}
+EOF
+```
+
+**Explanation:**
+```javascript
+// Think of provider like importing a library in code:
+
+// JavaScript equivalent:
+const AWS = require('aws-sdk');
+AWS.config.update({ region: 'us-east-1' });
+
+// Python equivalent:
+import boto3
+client = boto3.client('ec2', region_name='us-east-1')
+
+// Terraform does the same thing!
+```
+
+---
+
+## 🎯 Step 2: Variables (Input Parameters)
+
+**What this does:** Define values that can be changed without editing code
+
+```bash
+cat > variables.tf <<'EOF'
+# Variables = Input parameters
+# Like function parameters: function buildInfrastructure(region, vpcCidr) {...}
+
+variable "aws_region" {
+  description = "AWS region to deploy resources"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "project_name" {
+  description = "Project name for resource naming"
+  type        = string
+  default     = "techstore"
+}
+
+variable "vpc_cidr" {
+  description = "CIDR block for VPC"
+  type        = string
+  default     = "10.0.0.0/16"
+}
+
+variable "availability_zones" {
+  description = "Availability zones to use"
+  type        = list(string)
+  default     = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for public subnets"
+  type        = list(string)
+  default     = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for private subnets"
+  type        = list(string)
+  default     = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+}
+
+variable "db_username" {
+  description = "Database master username"
+  type        = string
+  default     = "admin"
+  sensitive   = true  # Won't show in logs
+}
+
+variable "db_password" {
+  description = "Database master password"
+  type        = string
+  sensitive   = true  # Won't show in logs
+}
+
+variable "instance_type" {
+  description = "EC2 instance type"
+  type        = string
+  default     = "t3.micro"
+}
+
+variable "my_ip" {
+  description = "Your IP address for SSH access"
+  type        = string
+  # Set this in terraform.tfvars
+}
+EOF
+```
+
+**Explanation:**
+```python
+# Variables are like function parameters
+
+def build_infrastructure(
+    aws_region="us-east-1",           # variable "aws_region"
+    vpc_cidr="10.0.0.0/16",           # variable "vpc_cidr"
+    instance_type="t3.micro"          # variable "instance_type"
+):
+    # Build infrastructure here
+    pass
+
+# In Terraform, you call it by setting values in terraform.tfvars
+```
+
+Create your values file:
+
+```bash
+cat > terraform.tfvars <<'EOF'
+# Your specific values
+# This is like passing arguments to a function
+
+aws_region     = "us-east-1"
+project_name   = "techstore"
+my_ip          = "YOUR_IP_HERE/32"  # Replace with your IP
+db_password    = "YourSecurePassword123!"
+
+# Optional overrides:
+# instance_type = "t3.small"  # If you want bigger instance
+# vpc_cidr      = "172.16.0.0/16"  # If you want different CIDR
+EOF
+```
+
+---
+
+## 🌐 Step 3: VPC and Networking
+
+**What this does:** Creates VPC, subnets, Internet Gateway, NAT Gateway, route tables
+
+```bash
+cat > vpc.tf <<'EOF'
+# ============================================================================
+# VPC (Virtual Private Cloud)
+# ============================================================================
+# Like creating the building foundation
+
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = {
+    Name = "${var.project_name}-vpc"
+  }
+}
+
+# ============================================================================
+# Internet Gateway (Front door to the internet)
+# ============================================================================
+
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id  # Attach to our VPC
+
+  tags = {
+    Name = "${var.project_name}-igw"
+  }
+}
+
+# ============================================================================
+# Public Subnets (Ground floors with street access)
+# ============================================================================
+
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidrs)  # Create 3 subnets
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true  # Auto-assign public IPs
+
+  tags = {
+    Name = "${var.project_name}-public-${var.availability_zones[count.index]}"
+    Type = "Public"
+  }
+}
+
+# ============================================================================
+# Private Subnets (Basement floors, no street access)
+# ============================================================================
+
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidrs)  # Create 3 subnets
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = var.availability_zones[count.index]
+
+  tags = {
+    Name = "${var.project_name}-private-${var.availability_zones[count.index]}"
+    Type = "Private"
+  }
+}
+
+# ============================================================================
+# Elastic IP for NAT Gateway (P.O. Box number)
+# ============================================================================
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+ 
+  # Depend on IGW (must exist first)
+  depends_on = [aws_internet_gateway.main]
+
+  tags = {
+    Name = "${var.project_name}-nat-eip"
+  }
+}
+
+# ============================================================================
+# NAT Gateway (Mail room on ground floor)
+# ============================================================================
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id  # Place in first public subnet
+
+  # Must wait for IGW to be ready
+  depends_on = [aws_internet_gateway.main]
+
+  tags = {
+    Name = "${var.project_name}-nat-gw"
+  }
+}
+
+# ============================================================================
+# Route Table for Public Subnets (Directions for ground floors)
+# ============================================================================
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  # Route to Internet Gateway
+  route {
+    cidr_block = "0.0.0.0/0"  # All internet traffic
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-public-rt"
+    Type = "Public"
+  }
+}
+
+# Associate public route table with public subnets
+resource "aws_route_table_association" "public" {
+  count = length(aws_subnet.public)
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+# ============================================================================
+# Route Table for Private Subnets (Directions for basement)
+# ============================================================================
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  # Route to NAT Gateway
+  route {
+    cidr_block     = "0.0.0.0/0"  # All internet traffic
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = {
+    Name = "${var.project_name}-private-rt"
+    Type = "Private"
+  }
+}
+
+# Associate private route table with private subnets
+resource "aws_route_table_association" "private" {
+  count = length(aws_subnet.private)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+# ============================================================================
+# VPC Flow Logs (Traffic monitoring)
+# ============================================================================
+
+resource "aws_flow_log" "main" {
+  iam_role_arn    = aws_iam_role.flow_logs.arn
+  log_destination = aws_cloudwatch_log_group.flow_logs.arn
+  traffic_type    = "ALL"
+  vpc_id          = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.project_name}-flow-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "flow_logs" {
+  name              = "/aws/vpc/${var.project_name}-flow-logs"
+  retention_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-flow-logs"
+  }
+}
+
+resource "aws_iam_role" "flow_logs" {
+  name = "${var.project_name}-flow-logs-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "vpc-flow-logs.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "flow_logs" {
+  name = "${var.project_name}-flow-logs-policy"
+  role = aws_iam_role.flow_logs.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogGroups",
+          "logs:DescribeLogStreams"
+        ]
+        Effect   = "Allow"
+        Resource = "*"
+      }
+    ]
+  })
+}
+EOF
+```
+
+**Explanation - Key Terraform Concepts:**
+
+### **1. Resource Blocks**
+```hcl
+resource "aws_vpc" "main" {
+  # resource "TYPE" "NAME"
+  #          ↓       ↓
+  #    What to    Local
+  #    create    reference
+  #              name
+}
+```
+
+**Code equivalent:**
+```javascript
+// JavaScript
+const main = new AWS.VPC({
+  cidrBlock: "10.0.0.0/16"
+});
+
+// Python
+main = ec2.create_vpc(
+    CidrBlock="10.0.0.0/16"
+)
+```
+
+### **2. References (Connecting Resources)**
+```hcl
+resource "aws_subnet" "public" {
+  vpc_id = aws_vpc.main.id
+  #        └─────┬──────┘
+  #              └─ Reference to another resource
+  #                 Format: resource_type.name.attribute
+}
+```
+
+**This is like:**
+```javascript
+// Create VPC first
+const vpc = createVPC({ cidr: "10.0.0.0/16" });
+
+// Then reference its ID when creating subnet
+const subnet = createSubnet({
+  vpcId: vpc.id  // ← Reference!
+});
+```
+
+### **3. Count (Creating Multiple Similar Resources)**
+```hcl
+resource "aws_subnet" "public" {
+  count = 3  # Create 3 subnets
+ 
+  cidr_block = var.public_subnet_cidrs[count.index]
+  #                                    └─ 0, 1, 2
+}
+```
+
+**Like a for loop:**
+```javascript
+// JavaScript equivalent
+for (let i = 0; i < 3; i++) {
+  createSubnet({
+    cidrBlock: public_subnet_cidrs[i]
+  });
+}
+```
+
+### **4. Depends_on (Explicit Dependencies)**
+```hcl
+resource "aws_nat_gateway" "main" {
+  # ... config ...
+ 
+  depends_on = [aws_internet_gateway.main]
+  # "Wait for IGW to be ready before creating NAT"
+}
+```
+
+**Like async/await:**
+```javascript
+// JavaScript
+await createInternetGateway();
+// Wait for it to finish ↑
+createNATGateway();  // Then create this
+```
+
+---
+
+## 💻 Step 4: EC2 Instance (Web Server)
+
+```bash
+cat > ec2.tf <<'EOF'
+# ============================================================================
+# Data Source: Get latest Amazon Linux 2023 AMI
+# ============================================================================
+# Data source = Query existing info (not create)
+
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+
+# ============================================================================
+# Security Group for Web Server (Bodyguard rules)
+# ============================================================================
+
+resource "aws_security_group" "web" {
+  name        = "${var.project_name}-web-sg"
+  description = "Security group for web server"
+  vpc_id      = aws_vpc.main.id
+
+  # Inbound rules
+  ingress {
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS from anywhere"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "SSH from my IP only"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
+
+  # Outbound rules
+  egress {
+    description = "Allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"  # All protocols
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-web-sg"
+  }
+}
+
+# ============================================================================
+# IAM Role for EC2 (Permissions)
+# ============================================================================
+
+resource "aws_iam_role" "ec2" {
+  name = "${var.project_name}-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach policies to role
+resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_cloudwatch" {
+  role       = aws_iam_role.ec2.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+# Create instance profile
+resource "aws_iam_instance_profile" "ec2" {
+  name = "${var.project_name}-ec2-profile"
+  role = aws_iam_role.ec2.name
+}
+
+# ============================================================================
+# SSH Key Pair
+# ============================================================================
+
+resource "aws_key_pair" "main" {
+  key_name   = "${var.project_name}-key"
+  public_key = file("~/.ssh/id_rsa.pub")  # Use your existing public key
+ 
+  # If you don't have a key, generate one first:
+  # ssh-keygen -t rsa -b 4096 -f ~/.ssh/techstore-key
+}
+
+# ============================================================================
+# EC2 Instance (Web Server)
+# ============================================================================
+
+resource "aws_instance" "web" {
+  ami                    = data.aws_ami.amazon_linux_2023.id
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.public[0].id
+  vpc_security_group_ids = [aws_security_group.web.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2.name
+  key_name               = aws_key_pair.main.key_name
+
+  # User data script (runs on first boot)
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              yum install -y httpd mariadb105
+             
+              cat > /var/www/html/index.html <<'HTML'
+              <!DOCTYPE html>
+              <html>
+              <head><title>TechStore - Terraform</title></head>
+              <body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+                  <h1>🛒 TechStore</h1>
+                  <p>Built with Terraform!</p>
+                  <p>Instance: $(ec2-metadata --instance-id | cut -d ' ' -f 2)</p>
+              </body>
+              </html>
+              HTML
+             
+              echo "OK" > /var/www/html/health.html
+             
+              systemctl start httpd
+              systemctl enable httpd
+              EOF
+
+  tags = {
+    Name = "${var.project_name}-web-server"
+  }
+}
+EOF
+```
+
+**Explanation:**
+
+### **Data Sources vs Resources**
+```hcl
+# DATA SOURCE = Query something that exists
+data "aws_ami" "amazon_linux_2023" {
+  # "Find me the latest Amazon Linux 2023 AMI"
+}
+
+# RESOURCE = Create something new
+resource "aws_instance" "web" {
+  # "Create a new EC2 instance"
+}
+```
+
+**Like:**
+```javascript
+// Data source = SELECT query
+const latestAMI = db.query("SELECT * FROM amis WHERE name LIKE 'al2023%' ORDER BY date DESC LIMIT 1");
+
+// Resource = INSERT query
+const instance = db.insert("instances", {
+  ami: latestAMI.id,
+  type: "t3.micro"
+});
+```
+
+### **User Data (Startup Script)**
+```hcl
+user_data = <<-EOF
+  #!/bin/bash
+  # Script here
+EOF
+```
+
+This is a **heredoc** - multi-line string:
+```javascript
+// JavaScript equivalent
+const userData = `
+#!/bin/bash
+yum install -y httpd
+systemctl start httpd
+`;
+```
+
+---
+
+## 🗄️ Step 5: RDS Database
+
+```bash
+cat > rds.tf <<'EOF'
+# ============================================================================
+# DB Subnet Group (Which floors database can use)
+# ============================================================================
+
+resource "aws_db_subnet_group" "main" {
+  name       = "${var.project_name}-db-subnet-group"
+  subnet_ids = aws_subnet.private[*].id  # All private subnets
+ 
+  tags = {
+    Name = "${var.project_name}-db-subnet-group"
+  }
+}
+
+# ============================================================================
+# Security Group for Database
+# ============================================================================
+
+resource "aws_security_group" "db" {
+  name        = "${var.project_name}-db-sg"
+  description = "Security group for RDS database"
+  vpc_id      = aws_vpc.main.id
+
+  # Allow MySQL from web server only
+  ingress {
+    description     = "MySQL from web server"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.web.id]  # Reference web SG!
+  }
+
+  # Outbound (usually not needed for RDS, but good practice)
+  egress {
+    description = "Allow all outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.project_name}-db-sg"
+  }
+}
+
+# ============================================================================
+# RDS MySQL Instance
+# ============================================================================
+
+resource "aws_db_instance" "main" {
+  identifier     = "${var.project_name}-db"
+  engine         = "mysql"
+  engine_version = "8.0"
+  instance_class = "db.t3.micro"
+
+  # Storage
+  allocated_storage     = 20
+  storage_type          = "gp3"
+  storage_encrypted     = true
+
+  # Database configuration
+  db_name  = "techstore"
+  username = var.db_username
+  password = var.db_password
+
+  # Network
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  publicly_accessible    = false
+
+  # High Availability (set to false for free tier)
+  multi_az = false
+
+  # Backup
+  backup_retention_period = 1  # Free tier: 1 day max
+  backup_window           = "03:00-04:00"
+  maintenance_window      = "sun:04:00-sun:05:00"
+
+  # Deletion protection
+  deletion_protection = false  # Set true in production!
+  skip_final_snapshot = true   # Set false in production!
+
+  # CloudWatch logs
+  enabled_cloudwatch_logs_exports = ["error", "general", "slowquery"]
+
+  tags = {
+    Name = "${var.project_name}-database"
+  }
+}
+EOF
+```
+
+**Explanation:**
+
+### **Resource References in Security Groups**
+```hcl
+ingress {
+  security_groups = [aws_security_group.web.id]
+  #                  └──────────┬─────────────┘
+  #                             └─ Reference to web SG
+}
+```
+
+**This is beautiful because:**
+```javascript
+// Instead of hardcoding:
+securityGroups: ["sg-12345"]  // ❌ Brittle
+
+// Terraform uses references:
+securityGroups: [webSecurityGroup.id]  // ✅ Dynamic
+```
+
+**If web SG is recreated:**
+- Bash: You'd have to manually update the ID everywhere
+- Terraform: Automatically updates all references!
+
+---
+
+## 🪣 Step 6: S3 Bucket
+
+```bash
+cat > s3.tf <<'EOF'
+# ============================================================================
+# S3 Bucket
+# ============================================================================
+
+resource "aws_s3_bucket" "assets" {
+  bucket = "${var.project_name}-${data.aws_caller_identity.current.account_id}-assets"
+  # Bucket names must be globally unique
+  # Using account ID ensures uniqueness
+
+  tags = {
+    Name = "${var.project_name}-assets"
+  }
+}
+
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}
+
+# ============================================================================
+# S3 Bucket Versioning
+# ============================================================================
+
+resource "aws_s3_bucket_versioning" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# ============================================================================
+# S3 Bucket Encryption
+# ============================================================================
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+    bucket_key_enabled = true
+  }
+}
+
+# ============================================================================
+# S3 Public Access Block
+# ============================================================================
+
+resource "aws_s3_bucket_public_access_block" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# ============================================================================
+# S3 Lifecycle Policy
+# ============================================================================
+
+resource "aws_s3_bucket_lifecycle_configuration" "assets" {
+  bucket = aws_s3_bucket.assets.id
+
+  rule {
+    id     = "delete-old-backups"
+    status = "Enabled"
+
+    filter {
+      prefix = "backups/"
+    }
+
+    expiration {
+      days = 30
+    }
+  }
+
+  rule {
+    id     = "delete-old-logs"
+    status = "Enabled"
+
+    filter {
+      prefix = "logs/"
+    }
+
+    expiration {
+      days = 7
+    }
+  }
+}
+EOF
+```
+
+**Explanation:**
+
+### **Why Separate Resources for Bucket Configuration?**
+
+```hcl
+# OLD WAY (deprecated):
+resource "aws_s3_bucket" "assets" {
+  bucket = "my-bucket"
+  versioning {
+    enabled = true
+  }
+  server_side_encryption_configuration {
+    # ...
+  }
+}
+
+# NEW WAY (current):
+resource "aws_s3_bucket" "assets" {
+  bucket = "my-bucket"
+}
+
+resource "aws_s3_bucket_versioning" "assets" {
+  bucket = aws_s3_bucket.assets.id
+  # ...
+}
+```
+
+**Why?** Separation of concerns - each feature is a separate resource.
+
+---
+
+## 📊 Step 7: CloudWatch Monitoring
+
+```bash
+cat > monitoring.tf <<'EOF'
+# ============================================================================
+# SNS Topic for Alerts
+# ============================================================================
+
+resource "aws_sns_topic" "alerts" {
+  name = "${var.project_name}-alerts"
+
+  tags = {
+    Name = "${var.project_name}-alerts"
+  }
+}
+
+# SNS Topic Subscription (Email)
+resource "aws_sns_topic_subscription" "alerts_email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email  # Add this variable
+}
+
+# ============================================================================
+# CloudWatch Alarms
+# ============================================================================
+
+# High CPU Alarm
+resource "aws_cloudwatch_metric_alarm" "web_high_cpu" {
+  alarm_name          = "${var.project_name}-high-cpu"
+  alarm_description   = "Alert when CPU exceeds 80%"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 80
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    InstanceId = aws_instance.web.id
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+
+  tags = {
+    Name = "${var.project_name}-high-cpu-alarm"
+  }
+}
+
+# RDS High CPU Alarm
+resource "aws_cloudwatch_metric_alarm" "db_high_cpu" {
+  alarm_name          = "${var.project_name}-rds-high-cpu"
+  alarm_description   = "Alert when RDS CPU exceeds 75%"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/RDS"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 75
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.main.id
+  }
+
+  alarm_actions = [aws_sns_topic.alerts.arn]
+}
+
+# ============================================================================
+# CloudWatch Dashboard
+# ============================================================================
+
+resource "aws_cloudwatch_dashboard" "main" {
+  dashboard_name = "${var.project_name}-monitoring"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["AWS/EC2", "CPUUtilization", { stat = "Average" }]
+          ]
+          period = 300
+          stat   = "Average"
+          region = var.aws_region
+          title  = "EC2 CPU Utilization"
+        }
+      },
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["AWS/RDS", "CPUUtilization", { stat = "Average" }]
+          ]
+          period = 300
+          stat   = "Average"
+          region = var.aws_region
+          title  = "RDS CPU Utilization"
+        }
+      }
+    ]
+  })
+}
+EOF
+```
+
+---
+
+## 📤 Step 8: Outputs (What to Display)
+
+```bash
+cat > outputs.tf <<'EOF'
+# Outputs = Values to display after terraform apply
+# Like function return values
+
+output "vpc_id" {
+  description = "VPC ID"
+  value       = aws_vpc.main.id
+}
+
+output "web_server_public_ip" {
+  description = "Web server public IP address"
+  value       = aws_instance.web.public_ip
+}
+
+output "web_server_url" {
+  description = "Web server URL"
+  value       = "http://${aws_instance.web.public_ip}"
+}
+
+output "database_endpoint" {
+  description = "RDS database endpoint"
+  value       = aws_db_instance.main.endpoint
+  sensitive   = true  # Won't show by default (security)
+}
+
+output "database_name" {
+  description = "Database name"
+  value       = aws_db_instance.main.db_name
+}
+
+output "s3_bucket_name" {
+  description = "S3 bucket name"
+  value       = aws_s3_bucket.assets.id
+}
+
+output "nat_gateway_ip" {
+  description = "NAT Gateway public IP"
+  value       = aws_eip.nat.public_ip
+}
+
+# To view sensitive outputs:
+# terraform output database_endpoint
+EOF
+```
+
+**Explanation:**
+```javascript
+// Outputs are like return values:
+
+function buildInfrastructure() {
+  const vpc = createVPC();
+  const instance = createInstance();
+ 
+  return {
+    vpcId: vpc.id,
+    instanceIP: instance.publicIp,
+    url: `http://${instance.publicIp}`
+  };
+}
+
+// Terraform outputs do the same!
+```
+
+---
+
+## 🚀 Step 9: Using Terraform
+
+### **Initialize Terraform**
+
+```bash
+# Download required providers (AWS plugin)
+terraform init
+```
+
+**Output:**
+```
+Initializing the backend...
+Initializing provider plugins...
+- Finding hashicorp/aws versions matching "~> 5.0"...
+- Installing hashicorp/aws v5.31.0...
+✓ Provider installed
+```
+
+**What happened:** Downloaded the AWS "driver" (provider)
+
+---
+
+### **Plan (Preview Changes)**
+
+```bash
+# Show what will be created
+terraform plan
+```
+
+**Output:**
+```
+Terraform will perform the following actions:
+
+  # aws_vpc.main will be created
+  + resource "aws_vpc" "main" {
+      + id                  = (known after apply)
+      + cidr_block          = "10.0.0.0/16"
+      ...
+    }
+
+  # aws_subnet.public[0] will be created
+  + resource "aws_subnet" "public" {
+      + id                  = (known after apply)
+      + cidr_block          = "10.0.1.0/24"
+      ...
+    }
+
+Plan: 45 to add, 0 to change, 0 to destroy.
+```
+
+**What this means:**
+- `+` = Will be created
+- `-` = Will be deleted
+- `~` = Will be modified
+- `45 to add` = Will create 45 resources
+
+---
+
+### **Apply (Build Everything)**
+
+```bash
+# Build the infrastructure
+terraform apply
+```
+
+Terraform asks for confirmation:
+```
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+```
+
+Type `yes` and press Enter.
+
+**Output:**
+```
+aws_vpc.main: Creating...
+aws_vpc.main: Creation complete after 2s [id=vpc-12345]
+aws_internet_gateway.main: Creating...
+aws_subnet.public[0]: Creating...
+...
+Apply complete! Resources: 45 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+vpc_id = "vpc-12345"
+web_server_public_ip = "34.201.2.157"
+web_server_url = "http://34.201.2.157"
+s3_bucket_name = "techstore-326623590328-assets"
+```
+
+**Duration:** ~10-15 minutes (similar to bash scripts)
+
+---
+
+### **Check What Was Created**
+
+```bash
+# List all resources
+terraform state list
+
+# Show details of specific resource
+terraform show aws_instance.web
+
+# View outputs
+terraform output
+terraform output web_server_url
+```
+
+---
+
+### **Destroy Everything**
+
+```bash
+# Delete all resources
+terraform destroy
+```
+
+Terraform shows what will be deleted:
+```
+Plan: 0 to add, 0 to change, 45 to destroy.
+
+Do you really want to destroy all resources?
+  Enter a value: yes
+```
+
+---
+
+## 🎯 Terraform vs Bash Comparison
+
+### **Creating a VPC:**
+
+**Bash:**
+```bash
+VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
+echo "export VPC_ID=$VPC_ID" >> env.sh
+```
+
+**Terraform:**
+```hcl
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+}
+# ID automatically tracked in state file
+```
+
+### **Creating Subnet in VPC:**
+
+**Bash:**
+```bash
+source env.sh  # Must load VPC_ID first
+SUBNET_ID=$(aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block 10.0.1.0/24 --query 'Subnet.SubnetId' --output text)
+```
+
+**Terraform:**
+```hcl
+resource "aws_subnet" "public" {
+  vpc_id     = aws_vpc.main.id  # Automatic reference!
+  cidr_block = "10.0.1.0/24"
+}
+```
+
+### **Creating 3 Subnets:**
+
+**Bash:**
+```bash
+for i in 0 1 2; do
+  CIDR="10.0.$((i+1)).0/24"
+  aws ec2 create-subnet --vpc-id $VPC_ID --cidr-block $CIDR
+done
+```
+
+**Terraform:**
+```hcl
+resource "aws_subnet" "public" {
+  count      = 3
+  cidr_block = var.public_subnet_cidrs[count.index]
+  vpc_id     = aws_vpc.main.id
+}
+```
+
+---
+
+## 🎓 Key Terraform Concepts Summary
+
+### **1. Declarative vs Imperative**
+
+**Bash (Imperative):** "Do this, then do that"
+```bash
+# Step 1
+create vpc
+# Step 2
+create subnet
+# Step 3
+create instance
+```
+
+**Terraform (Declarative):** "This is what I want"
+```hcl
+# I want these things:
+resource "aws_vpc" "main" { ... }
+resource "aws_subnet" "public" { ... }
+resource "aws_instance" "web" { ... }
+
+# Terraform figures out the order!
+```
+
+### **2. State Management**
+
+**Bash:** You track IDs manually
+```bash
+VPC_ID=vpc-12345  # You remember this
+SUBNET_ID=subnet-abc  # You remember this
+```
+
+**Terraform:** State file tracks everything
+```json
+{
+  "resources": {
+    "aws_vpc.main": { "id": "vpc-12345" },
+    "aws_subnet.public": { "id": "subnet-abc" }
+  }
+}
+```
+
+### **3. Dependency Graph**
+
+Terraform automatically figures out order:
+```
+VPC must be created first
+  ↓
+Then subnets (need VPC ID)
+  ↓
+Then instances (need subnet ID)
+```
+
+### **4. Idempotency**
+
+**Bash:** Run twice = create twice
+```bash
+aws ec2 create-vpc  # Creates VPC
+aws ec2 create-vpc  # Creates ANOTHER VPC
+```
+
+**Terraform:** Run twice = no change
+```bash
+terraform apply  # Creates VPC
+terraform apply  # "Already exists, no changes"
+```
+
+---
+
+## 📦 Complete Setup Script
+
+```bash
+cat > setup-terraform.sh <<'EOF'
+#!/bin/bash
+
+echo "Setting up Terraform project..."
+
+# Create directory
+mkdir -p techstore-terraform
+cd techstore-terraform
+
+# Initialize Terraform
+terraform init
+
+# Format code
+terraform fmt
+
+# Validate configuration
+terraform validate
+
+# Plan (preview)
+terraform plan -out=tfplan
+
+echo ""
+echo "✅ Terraform is ready!"
+echo ""
+echo "Next steps:"
+echo "  1. Review the plan: terraform show tfplan"
+echo "  2. Apply changes: terraform apply tfplan"
+echo "  3. View outputs: terraform output"
+echo ""
+EOF
+
+chmod +x setup-terraform.sh
+```
+
+---
+
+**Continue to Part 2 for advanced Terraform features like:**
+- Modules (reusable components)
+- Remote state (team collaboration)
+- Workspaces (dev/staging/prod)
+- Data sources
+- Provisioners
+
+Ready to continue? 🚀
+
+# 🚀 Terraform Advanced Features - Part 2
+
+Let's dive into advanced Terraform concepts that make it production-ready!
+
+---
+
+## 📚 Part 2 Agenda
+
+1. ✅ Modules (Reusable Components)
+2. ✅ Remote State (Team Collaboration)
+3. ✅ Workspaces (Dev/Staging/Prod)
+4. ✅ Data Sources (Query Existing Resources)
+5. ✅ Locals (Computed Values)
+6. ✅ For_each vs Count
+7. ✅ Provisioners (Post-Creation Scripts)
+8. ✅ Import Existing Resources
+9. ✅ Best Practices
+
+---
+
+## 🧩 1. Modules (Reusable Components)
+
+**What are modules?** Think of them as **functions** in programming - reusable blocks of code.
+
+### **Current Problem:**
+
+```hcl
+# Without modules - everything in one file
+resource "aws_vpc" "main" { ... }
+resource "aws_subnet" "public" { ... }
+resource "aws_instance" "web" { ... }
+# 500 lines of code! 😱
+```
+
+### **Solution: Split into Modules**
+
+```
+techstore-terraform/
+├── main.tf              # Main entry point
+├── modules/
+│   ├── networking/      # VPC, subnets, etc.
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── compute/         # EC2 instances
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   └── database/        # RDS
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
+```
+
+---
+
+### **Creating the Networking Module**
+
+```bash
+mkdir -p modules/networking
+cat > modules/networking/main.tf <<'EOF'
+# ============================================================================
+# NETWORKING MODULE
+# Manages VPC, Subnets, IGW, NAT, Route Tables
+# ============================================================================
+
+# VPC
+resource "aws_vpc" "main" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-vpc"
+    }
+  )
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-igw"
+    }
+  )
+}
+
+# Public Subnets
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidrs)
+
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = var.public_subnet_cidrs[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-public-${var.availability_zones[count.index]}"
+      Type = "Public"
+    }
+  )
+}
+
+# Private Subnets
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidrs)
+
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = var.private_subnet_cidrs[count.index]
+  availability_zone = var.availability_zones[count.index]
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-private-${var.availability_zones[count.index]}"
+      Type = "Private"
+    }
+  )
+}
+
+# NAT Gateway
+resource "aws_eip" "nat" {
+  domain     = "vpc"
+  depends_on = [aws_internet_gateway.main]
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-nat-eip"
+    }
+  )
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+  depends_on    = [aws_internet_gateway.main]
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-nat-gw"
+    }
+  )
+}
+
+# Route Tables
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.main.id
+  }
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-public-rt"
+    }
+  )
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-private-rt"
+    }
+  )
+}
+
+# Route Table Associations
+resource "aws_route_table_association" "public" {
+  count = length(aws_subnet.public)
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count = length(aws_subnet.private)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+EOF
+```
+
+---
+
+### **Module Variables**
+
+```bash
+cat > modules/networking/variables.tf <<'EOF'
+# Input variables for networking module
+
+variable "project_name" {
+  description = "Project name for resource naming"
+  type        = string
+}
+
+variable "vpc_cidr" {
+  description = "CIDR block for VPC"
+  type        = string
+}
+
+variable "availability_zones" {
+  description = "List of availability zones"
+  type        = list(string)
+}
+
+variable "public_subnet_cidrs" {
+  description = "CIDR blocks for public subnets"
+  type        = list(string)
+}
+
+variable "private_subnet_cidrs" {
+  description = "CIDR blocks for private subnets"
+  type        = list(string)
+}
+
+variable "common_tags" {
+  description = "Common tags for all resources"
+  type        = map(string)
+  default     = {}
+}
+EOF
+```
+
+---
+
+### **Module Outputs**
+
+```bash
+cat > modules/networking/outputs.tf <<'EOF'
+# Outputs from networking module
+# These can be used by other modules
+
+output "vpc_id" {
+  description = "VPC ID"
+  value       = aws_vpc.main.id
+}
+
+output "public_subnet_ids" {
+  description = "List of public subnet IDs"
+  value       = aws_subnet.public[*].id
+}
+
+output "private_subnet_ids" {
+  description = "List of private subnet IDs"
+  value       = aws_subnet.private[*].id
+}
+
+output "nat_gateway_id" {
+  description = "NAT Gateway ID"
+  value       = aws_nat_gateway.main.id
+}
+
+output "internet_gateway_id" {
+  description = "Internet Gateway ID"
+  value       = aws_internet_gateway.main.id
+}
+EOF
+```
+
+---
+
+### **Using the Module**
+
+```bash
+cat > main.tf <<'EOF'
+# ============================================================================
+# MAIN TERRAFORM CONFIGURATION
+# Uses modules to build infrastructure
+# ============================================================================
+
+# Local values (computed once, reused everywhere)
+locals {
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+    Owner       = "CloudOps-Team"
+  }
+}
+
+# ============================================================================
+# NETWORKING MODULE
+# ============================================================================
+
+module "networking" {
+  source = "./modules/networking"
+
+  project_name         = var.project_name
+  vpc_cidr             = var.vpc_cidr
+  availability_zones   = var.availability_zones
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  private_subnet_cidrs = var.private_subnet_cidrs
+  common_tags          = local.common_tags
+}
+
+# ============================================================================
+# COMPUTE MODULE
+# ============================================================================
+
+module "compute" {
+  source = "./modules/compute"
+
+  project_name     = var.project_name
+  vpc_id           = module.networking.vpc_id
+  public_subnet_id = module.networking.public_subnet_ids[0]
+  instance_type    = var.instance_type
+  my_ip            = var.my_ip
+  common_tags      = local.common_tags
+}
+
+# ============================================================================
+# DATABASE MODULE
+# ============================================================================
+
+module "database" {
+  source = "./modules/database"
+
+  project_name       = var.project_name
+  vpc_id             = module.networking.vpc_id
+  private_subnet_ids = module.networking.private_subnet_ids
+  web_security_group = module.compute.web_security_group_id
+  db_username        = var.db_username
+  db_password        = var.db_password
+  common_tags        = local.common_tags
+}
+EOF
+```
+
+**Explanation:**
+
+```javascript
+// Modules are like importing functions
+
+// networking.js
+export function createVPC(config) {
+  // Create VPC, subnets, etc.
+  return { vpcId, subnetIds };
+}
+
+// main.js
+import { createVPC } from './networking';
+
+const network = createVPC({
+  cidr: "10.0.0.0/16"
+});
+
+const compute = createEC2({
+  vpcId: network.vpcId  // Use output from networking module
+});
+```
+
+---
+
+### **Module Benefits:**
+
+```
+✅ Reusable: Use same module for dev/staging/prod
+✅ Maintainable: Fix bug in one place
+✅ Readable: Clear separation of concerns
+✅ Testable: Test modules independently
+✅ Shareable: Publish modules to registry
+```
+
+---
+
+## 🌍 2. Remote State (Team Collaboration)
+
+**Problem:** Default state is local file `terraform.tfstate`
+
+```
+Developer A: terraform apply (creates VPC)
+Developer B: terraform apply (creates ANOTHER VPC!)
+❌ Two people = two state files = chaos!
+```
+
+**Solution:** Store state in S3 (remote backend)
+
+```bash
+cat > backend.tf <<'EOF'
+# ============================================================================
+# REMOTE STATE BACKEND
+# Store state in S3 with DynamoDB locking
+# ============================================================================
+
+terraform {
+  backend "s3" {
+    bucket         = "techstore-terraform-state-326623590328"  # Must be globally unique
+    key            = "prod/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "techstore-terraform-locks"
+   
+    # Optional: Enable versioning for state file
+    # versioning = true
+  }
+}
+EOF
+```
+
+---
+
+### **Create S3 Bucket for State (One-time Setup)**
+
+```bash
+cat > setup-remote-state.sh <<'EOF'
+#!/bin/bash
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET_NAME="techstore-terraform-state-${ACCOUNT_ID}"
+REGION="us-east-1"
+
+echo "Setting up remote state backend..."
+echo ""
+
+# Create S3 bucket
+echo "1. Creating S3 bucket: $BUCKET_NAME"
+aws s3api create-bucket \
+  --bucket $BUCKET_NAME \
+  --region $REGION
+
+# Enable versioning
+echo "2. Enabling versioning..."
+aws s3api put-bucket-versioning \
+  --bucket $BUCKET_NAME \
+  --versioning-configuration Status=Enabled
+
+# Enable encryption
+echo "3. Enabling encryption..."
+aws s3api put-bucket-encryption \
+  --bucket $BUCKET_NAME \
+  --server-side-encryption-configuration '{
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "AES256"
+      }
+    }]
+  }'
+
+# Block public access
+echo "4. Blocking public access..."
+aws s3api put-public-access-block \
+  --bucket $BUCKET_NAME \
+  --public-access-block-configuration \
+    "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+# Create DynamoDB table for locking
+echo "5. Creating DynamoDB table for state locking..."
+aws dynamodb create-table \
+  --table-name techstore-terraform-locks \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST \
+  --region $REGION
+
+echo ""
+echo "✅ Remote state backend ready!"
+echo ""
+echo "Update backend.tf with:"
+echo "  bucket = \"$BUCKET_NAME\""
+echo ""
+EOF
+
+chmod +x setup-remote-state.sh
+bash setup-remote-state.sh
+```
+
+---
+
+### **Migrate Local State to Remote**
+
+```bash
+# Initialize with new backend
+terraform init -migrate-state
+
+# Terraform asks:
+# Do you want to copy existing state to the new backend?
+#   Enter a value: yes
+```
+
+**What happens:**
+```
+Before: terraform.tfstate (local file)
+After:  s3://bucket/prod/terraform.tfstate (remote)
+```
+
+**Benefits:**
+```
+✅ Team collaboration (shared state)
+✅ State locking (prevents conflicts)
+✅ Versioning (can rollback)
+✅ Encryption (secure sensitive data)
+✅ Backup (S3 durability)
+```
+
+---
+
+## 🔄 3. Workspaces (Environments)
+
+**Problem:** You need dev, staging, and prod environments
+
+**Bad approach:**
+```
+techstore-dev/
+techstore-staging/
+techstore-prod/
+# Three separate copies of code! 😱
+```
+
+**Good approach: Workspaces**
+
+```bash
+# List workspaces
+terraform workspace list
+# * default
+
+# Create dev workspace
+terraform workspace new dev
+# Created and switched to workspace "dev"
+
+# Create staging workspace
+terraform workspace new staging
+
+# Create prod workspace
+terraform workspace new prod
+
+# Switch between workspaces
+terraform workspace select dev
+terraform workspace select prod
+```
+
+---
+
+### **Using Workspaces in Code**
+
+```bash
+cat > environments.tf <<'EOF'
+# ============================================================================
+# ENVIRONMENT-SPECIFIC CONFIGURATION
+# ============================================================================
+
+locals {
+  # Get current workspace name
+  environment = terraform.workspace
+ 
+  # Environment-specific settings
+  env_config = {
+    dev = {
+      instance_type = "t3.micro"
+      db_instance   = "db.t3.micro"
+      multi_az      = false
+      min_size      = 1
+      max_size      = 2
+    }
+    staging = {
+      instance_type = "t3.small"
+      db_instance   = "db.t3.small"
+      multi_az      = false
+      min_size      = 2
+      max_size      = 4
+    }
+    prod = {
+      instance_type = "t3.medium"
+      db_instance   = "db.t3.medium"
+      multi_az      = true
+      min_size      = 3
+      max_size      = 10
+    }
+  }
+ 
+  # Select current environment config
+  current_config = local.env_config[local.environment]
+}
+
+# Use environment-specific values
+resource "aws_instance" "web" {
+  instance_type = local.current_config.instance_type
+  # ...
+}
+
+resource "aws_db_instance" "main" {
+  instance_class = local.current_config.db_instance
+  multi_az       = local.current_config.multi_az
+  # ...
+}
+EOF
+```
+
+**Usage:**
+
+```bash
+# Deploy to dev
+terraform workspace select dev
+terraform apply
+# Creates: techstore-dev-vpc, techstore-dev-web, etc.
+
+# Deploy to prod
+terraform workspace select prod
+terraform apply
+# Creates: techstore-prod-vpc, techstore-prod-web, etc.
+```
+
+**State files are separate:**
+```
+s3://bucket/env:/dev/terraform.tfstate
+s3://bucket/env:/staging/terraform.tfstate
+s3://bucket/env:/prod/terraform.tfstate
+```
+
+---
+
+## 🔍 4. Data Sources (Query Existing Resources)
+
+**Data sources** = Read-only queries for existing resources
+
+### **Common Use Cases:**
+
+```bash
+cat > data-sources.tf <<'EOF'
+# ============================================================================
+# DATA SOURCES - Query existing AWS resources
+# ============================================================================
+
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}
+
+# Get available availability zones
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Get latest Amazon Linux 2023 AMI
+data "aws_ami" "amazon_linux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+}
+
+# Get existing VPC (if importing to existing infrastructure)
+data "aws_vpc" "existing" {
+  count = var.use_existing_vpc ? 1 : 0
+ 
+  filter {
+    name   = "tag:Name"
+    values = ["existing-vpc"]
+  }
+}
+
+# Get existing security group
+data "aws_security_group" "existing_sg" {
+  count = var.use_existing_sg ? 1 : 0
+ 
+  name   = "existing-security-group"
+  vpc_id = var.vpc_id
+}
+
+# Get Route53 hosted zone
+data "aws_route53_zone" "main" {
+  count = var.create_dns_record ? 1 : 0
+ 
+  name         = "example.com"
+  private_zone = false
+}
+
+# Get SSM Parameter (for secrets)
+data "aws_ssm_parameter" "db_password" {
+  name = "/techstore/database/password"
+}
+
+# Use data sources:
+resource "aws_instance" "web" {
+  ami = data.aws_ami.amazon_linux_2023.id  # Latest AMI
+  # ...
+}
+
+output "account_id" {
+  value = data.aws_caller_identity.current.account_id
+}
+
+output "available_azs" {
+  value = data.aws_availability_zones.available.names
+}
+EOF
+```
+
+**Explanation:**
+
+```javascript
+// Data sources are like SELECT queries
+
+// Resource = CREATE/INSERT
+resource "aws_vpc" "main" {
+  // CREATE new VPC
+}
+
+// Data source = SELECT/QUERY
+data "aws_vpc" "existing" {
+  // QUERY existing VPC
+}
+
+// Usage:
+const newVPC = createVPC({ cidr: "10.0.0.0/16" });     // Resource
+const oldVPC = queryVPC({ name: "existing-vpc" });     // Data source
+```
+
+---
+
+## 📦 5. Locals (Computed Values)
+
+**Locals** = Variables computed from other values (like functions)
+
+```bash
+cat > locals.tf <<'EOF'
+# ============================================================================
+# LOCAL VALUES - Computed/derived values
+# ============================================================================
+
+locals {
+  # Current timestamp
+  timestamp = formatdate("YYYY-MM-DD-hhmm", timestamp())
+ 
+  # Environment name with prefix
+  env_prefix = "${var.project_name}-${terraform.workspace}"
+ 
+  # Common tags (used by all resources)
+  common_tags = {
+    Project     = var.project_name
+    Environment = terraform.workspace
+    ManagedBy   = "Terraform"
+    CreatedAt   = local.timestamp
+    Owner       = var.owner_email
+  }
+ 
+  # Conditional logic
+  is_production = terraform.workspace == "prod"
+  enable_backup = local.is_production ? true : false
+ 
+  # Complex computations
+  total_subnets = length(var.public_subnet_cidrs) + length(var.private_subnet_cidrs)
+ 
+  # List manipulation
+  all_subnet_cidrs = concat(var.public_subnet_cidrs, var.private_subnet_cidrs)
+ 
+  # Map manipulation
+  subnet_map = {
+    for idx, cidr in local.all_subnet_cidrs :
+    "subnet-${idx}" => cidr
+  }
+ 
+  # Resource naming convention
+  resource_names = {
+    vpc        = "${local.env_prefix}-vpc"
+    web_server = "${local.env_prefix}-web"
+    database   = "${local.env_prefix}-db"
+    s3_bucket  = "${local.env_prefix}-assets-${data.aws_caller_identity.current.account_id}"
+  }
+}
+
+# Usage:
+resource "aws_vpc" "main" {
+  cidr_block = var.vpc_cidr
+ 
+  tags = merge(
+    local.common_tags,
+    {
+      Name = local.resource_names.vpc
+    }
+  )
+}
+
+resource "aws_instance" "web" {
+  # ...
+ 
+  tags = merge(
+    local.common_tags,
+    {
+      Name   = local.resource_names.web_server
+      Backup = local.enable_backup
+    }
+  )
+}
+EOF
+```
+
+**Explanation:**
+
+```javascript
+// Locals are like computed properties
+
+const locals = {
+  // Simple value
+  envPrefix: `${projectName}-${environment}`,
+ 
+  // Conditional
+  isProduction: environment === "prod",
+  enableBackup: this.isProduction ? true : false,
+ 
+  // Computed from other locals
+  resourceName: `${this.envPrefix}-vpc`,
+ 
+  // Object merging
+  commonTags: {
+    Project: projectName,
+    Environment: environment,
+    ManagedBy: "Terraform"
+  }
+};
+
+// Use like this:
+const vpc = createVPC({
+  name: locals.resourceName,
+  tags: locals.commonTags
+});
+```
+
+---
+
+## 🔁 6. For_each vs Count
+
+### **Count (Simple Iteration)**
+
+```hcl
+# Create 3 identical subnets (with different CIDRs)
+resource "aws_subnet" "public" {
+  count = 3
+ 
+  cidr_block = var.public_subnet_cidrs[count.index]  # 0, 1, 2
+  # Problem: Identified by index (0, 1, 2)
+}
+
+# Reference:
+aws_subnet.public[0].id
+aws_subnet.public[1].id
+aws_subnet.public[2].id
+```
+
+**Problem with count:**
+```
+You have: subnet[0], subnet[1], subnet[2]
+
+If you delete subnet[1]:
+subnet[0] stays
+subnet[1] gets deleted
+subnet[2] becomes subnet[1]  ← RECREATED!
+```
+
+---
+
+### **For_each (Key-Value Iteration)**
+
+```hcl
+# Create subnets with named keys
+resource "aws_subnet" "public" {
+  for_each = {
+    us-east-1a = "10.0.1.0/24"
+    us-east-1b = "10.0.2.0/24"
+    us-east-1c = "10.0.3.0/24"
+  }
+ 
+  availability_zone = each.key      # us-east-1a
+  cidr_block        = each.value    # 10.0.1.0/24
+ 
+  tags = {
+    Name = "public-${each.key}"
+  }
+}
+
+# Reference:
+aws_subnet.public["us-east-1a"].id
+aws_subnet.public["us-east-1b"].id
+aws_subnet.public["us-east-1c"].id
+```
+
+**Benefit:**
+```
+You have: subnet["1a"], subnet["1b"], subnet["1c"]
+
+If you delete subnet["1b"]:
+subnet["1a"] stays  ← No change
+subnet["1b"] deleted
+subnet["1c"] stays  ← No change
+```
+
+---
+
+### **Advanced For_each Examples**
+
+```hcl
+# ============================================================================
+# FOR_EACH EXAMPLES
+# ============================================================================
+
+# Example 1: Create security groups for different tiers
+locals {
+  security_groups = {
+    web = {
+      description = "Web server security group"
+      ingress = [
+        { port = 80, cidr = "0.0.0.0/0" },
+        { port = 443, cidr = "0.0.0.0/0" }
+      ]
+    }
+    app = {
+      description = "Application server security group"
+      ingress = [
+        { port = 8080, cidr = "10.0.0.0/16" }
+      ]
+    }
+    db = {
+      description = "Database security group"
+      ingress = [
+        { port = 3306, cidr = "10.0.0.0/16" }
+      ]
+    }
+  }
+}
+
+resource "aws_security_group" "tiers" {
+  for_each = local.security_groups
+ 
+  name        = "${var.project_name}-${each.key}-sg"
+  description = each.value.description
+  vpc_id      = aws_vpc.main.id
+ 
+  dynamic "ingress" {
+    for_each = each.value.ingress
+   
+    content {
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value.cidr]
+    }
+  }
+}
+
+# Example 2: Create subnets in multiple AZs
+locals {
+  subnets = {
+    for idx, az in var.availability_zones :
+    az => {
+      public_cidr  = var.public_subnet_cidrs[idx]
+      private_cidr = var.private_subnet_cidrs[idx]
+    }
+  }
+}
+
+resource "aws_subnet" "public" {
+  for_each = local.subnets
+ 
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = each.value.public_cidr
+  availability_zone = each.key
+ 
+  tags = {
+    Name = "public-${each.key}"
+  }
+}
+
+# Example 3: Create IAM users from list
+variable "developers" {
+  default = ["alice", "bob", "charlie"]
+}
+
+resource "aws_iam_user" "developers" {
+  for_each = toset(var.developers)  # Convert list to set
+ 
+  name = each.key
+ 
+  tags = {
+    Team = "Development"
+  }
+}
+```
+
+**When to use what:**
+
+```
+Use COUNT when:
+✅ Creating N identical resources
+✅ Simple iteration (0, 1, 2, ...)
+✅ Resources are truly interchangeable
+
+Use FOR_EACH when:
+✅ Resources have meaningful names/keys
+✅ Need to add/remove specific items
+✅ Complex configurations per item
+✅ Resources are NOT interchangeable
+```
+
+---
+
+## 🔧 7. Provisioners (Post-Creation Scripts)
+
+**Provisioners** = Run scripts after resource creation (use sparingly!)
+
+```hcl
+# ============================================================================
+# PROVISIONERS - Execute scripts after creation
+# ============================================================================
+
+resource "aws_instance" "web" {
+  ami           = data.aws_ami.amazon_linux_2023.id
+  instance_type = var.instance_type
+  subnet_id     = aws_subnet.public[0].id
+  key_name      = aws_key_pair.main.key_name
+ 
+  # Connection details for provisioners
+  connection {
+    type        = "ssh"
+    user        = "ec2-user"
+    private_key = file("~/.ssh/id_rsa")
+    host        = self.public_ip
+  }
+ 
+  # File provisioner: Upload files
+  provisioner "file" {
+    source      = "scripts/setup.sh"
+    destination = "/tmp/setup.sh"
+  }
+ 
+  # Remote-exec: Run commands on remote machine
+  provisioner "remote-exec" {
+    inline = [
+      "chmod +x /tmp/setup.sh",
+      "sudo /tmp/setup.sh",
+      "sudo systemctl start httpd"
+    ]
+  }
+ 
+  # Local-exec: Run commands on YOUR machine
+  provisioner "local-exec" {
+    command = "echo ${self.public_ip} >> instances.txt"
+  }
+ 
+  # Local-exec with environment variables
+  provisioner "local-exec" {
+    command = "ansible-playbook -i ${self.public_ip}, playbook.yml"
+   
+    environment = {
+      ANSIBLE_HOST_KEY_CHECKING = "False"
+    }
+  }
+ 
+  # Destroy-time provisioner (runs when destroying)
+  provisioner "local-exec" {
+    when    = destroy
+    command = "echo 'Deleting instance' >> destroy.log"
+  }
+}
+```
+
+**⚠️ Warning: Provisioners are a last resort!**
+
+**Better alternatives:**
+
+```hcl
+# ❌ BAD: Use provisioner
+resource "aws_instance" "web" {
+  # ...
+ 
+  provisioner "remote-exec" {
+    inline = ["sudo yum install -y httpd"]
+  }
+}
+
+# ✅ GOOD: Use user_data
+resource "aws_instance" "web" {
+  # ...
+ 
+  user_data = <<-EOF
+              #!/bin/bash
+              yum install -y httpd
+              systemctl start httpd
+              EOF
+}
+
+# ✅ BETTER: Use configuration management
+resource "aws_instance" "web" {
+  # ...
+  user_data = templatefile("${path.module}/cloud-init.yml", {
+    packages = ["httpd", "mariadb"]
+  })
+}
+
+# ✅ BEST: Use pre-built AMI (Packer)
+resource "aws_instance" "web" {
+  ami = "ami-xxxxx"  # Custom AMI with everything pre-installed
+}
+```
+
+---
+
+## 📥 8. Import Existing Resources
+
+**Problem:** You have existing AWS resources created manually. How to bring them into Terraform?
+
+### **Step 1: Write Terraform Configuration**
+
+```hcl
+# Write the configuration for existing resource
+resource "aws_vpc" "imported" {
+  cidr_block = "10.0.0.0/16"
+  # Don't apply yet!
+}
+```
+
+### **Step 2: Import Resource**
+
+```bash
+# Import existing VPC
+terraform import aws_vpc.imported vpc-12345abc
+
+# Terraform output:
+# aws_vpc.imported: Importing from ID "vpc-12345abc"...
+# Import successful!
+```
+
+### **Step 3: Verify State**
+
+```bash
+# Check imported resource
+terraform show aws_vpc.imported
+
+# Align your configuration with actual resource
+terraform plan
+# Should show: No changes
+```
+
+---
+
+### **Bulk Import Script**
+
+```bash
+cat > import-existing-resources.sh <<'EOF'
+#!/bin/bash
+
+echo "Importing existing AWS resources into Terraform..."
+
+# Import VPC
+terraform import aws_vpc.main vpc-06bb34cc71f7985ea
+
+# Import Subnets
+terraform import 'aws_subnet.public[0]' subnet-0f8b0c7f1d1993f5a
+terraform import 'aws_subnet.public[1]' subnet-0a1b2c3d4e5f6g7h8
+terraform import 'aws_subnet.public[2]' subnet-0i9j8k7l6m5n4o3p2
+
+# Import Internet Gateway
+terraform import aws_internet_gateway.main igw-0e42ef53f7f74a557
+
+# Import NAT Gateway
+terraform import aws_nat_gateway.main nat-01787c7ee8636352f
+
+# Import EC2 Instance
+terraform import aws_instance.web i-0c1cd5de163e17242
+
+# Import RDS
+terraform import aws_db_instance.main techstore-db
+
+# Import S3 Bucket
+terraform import aws_s3_bucket.assets techstore-326623590328-assets
+
+echo "✅ Import complete!"
+echo "Run: terraform plan to verify"
+EOF
+
+chmod +x import-existing-resources.sh
+```
+
+---
+
+## 📊 9. Best Practices
+
+### **Project Structure**
+
+```
+techstore-terraform/
+├── environments/
+│   ├── dev/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── terraform.tfvars
+│   ├── staging/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── terraform.tfvars
+│   └── prod/
+│       ├── main.tf
+│       ├── variables.tf
+│       └── terraform.tfvars
+├── modules/
+│   ├── networking/
+│   ├── compute/
+│   ├── database/
+│   └── monitoring/
+├── scripts/
+│   └── user-data.sh
+└── README.md
+```
+
+---
+
+### **Naming Conventions**
+
+```hcl
+# Resources: noun_descriptor
+resource "aws_vpc" "main" {}           # ✅
+resource "aws_instance" "web_server" {} # ✅
+resource "aws_vpc" "create_vpc" {}     # ❌ Don't use verbs
+
+# Variables: descriptive names
+variable "vpc_cidr_block" {}           # ✅
+variable "x" {}                        # ❌ Too short
+variable "this_is_the_vpc_cidr" {}    # ❌ Too long
+
+# Tags: consistent across all resources
+tags = {
+  Name        = "${var.project_name}-${var.environment}-resource"
+  Environment = var.environment
+  ManagedBy   = "Terraform"
+  Owner       = var.owner_email
+  CostCenter  = var.cost_center
+}
+```
+
+---
+
+### **Security Best Practices**
+
+```hcl
+# ❌ DON'T: Hardcode secrets
+variable "db_password" {
+  default = "MyPassword123!"  # ❌ BAD!
+}
+
+# ✅ DO: Use sensitive variables
+variable "db_password" {
+  type      = string
+  sensitive = true
+  # Set in terraform.tfvars (not in git)
+  # Or use environment variable: TF_VAR_db_password
+}
+
+# ✅ BETTER: Use AWS Secrets Manager
+data "aws_secretsmanager_secret_version" "db_password" {
+  secret_id = "techstore/db/password"
+}
+
+resource "aws_db_instance" "main" {
+  password = data.aws_secretsmanager_secret_version.db_password.secret_string
+}
+
+# ✅ BEST: Random password + Secrets Manager
+resource "random_password" "db_password" {
+  length  = 16
+  special = true
+}
+
+resource "aws_secretsmanager_secret" "db_password" {
+  name = "techstore/db/password"
+}
+
+resource "aws_secretsmanager_secret_version" "db_password" {
+  secret_id     = aws_secretsmanager_secret.db_password.id
+  secret_string = random_password.db_password.result
+}
+```
+
+---
+
+### **State Management**
+
+```hcl
+# ✅ Use remote state
+terraform {
+  backend "s3" {
+    bucket         = "terraform-state-bucket"
+    key            = "prod/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+}
+
+# ✅ Enable state locking
+# (DynamoDB table prevents concurrent modifications)
+
+# ✅ Use state file versioning
+# (S3 bucket versioning for rollback)
+
+# ❌ DON'T commit state files to git
+# Add to .gitignore:
+*.tfstate
+*.tfstate.backup
+.terraform/
+```
+
+---
+
+### **Documentation**
+
+```hcl
+# Add descriptions to everything
+
+variable "vpc_cidr" {
+  description = "CIDR block for VPC. Must be /16 for proper subnet allocation."
+  type        = string
+  default     = "10.0.0.0/16"
+ 
+  validation {
+    condition     = can(regex("^10\\.0\\.0\\.0/16$", var.vpc_cidr))
+    error_message = "VPC CIDR must be 10.0.0.0/16"
+  }
+}
+
+resource "aws_vpc" "main" {
+  cidr_block = var.vpc_cidr
+ 
+  # Enable DNS for RDS endpoints to work
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+ 
+  tags = {
+    Name = "${var.project_name}-vpc"
+    # Purpose: Main VPC for application infrastructure
+    # Dependencies: None (base resource)
+  }
+}
+```
+
+---
+
+## 🎓 Complete Working Example
+
+Let me create a complete, production-ready Terraform project:
+
+```bash
+cat > create-complete-terraform-project.sh <<'EOF'
+#!/bin/bash
+
+echo "Creating complete Terraform project..."
+
+# Create directory structure
+mkdir -p techstore-terraform/{modules/{networking,compute,database},environments/{dev,prod}}
+
+cd techstore-terraform
+
+# Create root main.tf
+cat > main.tf <<'MAIN'
+terraform {
+  required_version = ">= 1.0"
+ 
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+locals {
+  common_tags = {
+    Project     = var.project_name
+    Environment = terraform.workspace
+    ManagedBy   = "Terraform"
+  }
+}
+
+module "networking" {
+  source = "./modules/networking"
+ 
+  project_name         = var.project_name
+  vpc_cidr             = var.vpc_cidr
+  availability_zones   = var.availability_zones
+  public_subnet_cidrs  = var.public_subnet_cidrs
+  private_subnet_cidrs = var.private_subnet_cidrs
+  common_tags          = local.common_tags
+}
+
+module "compute" {
+  source = "./modules/compute"
+ 
+  project_name     = var.project_name
+  vpc_id           = module.networking.vpc_id
+  public_subnet_id = module.networking.public_subnet_ids[0]
+  instance_type    = var.instance_type
+  common_tags      = local.common_tags
+}
+
+module "database" {
+  source = "./modules/database"
+ 
+  project_name        = var.project_name
+  vpc_id              = module.networking.vpc_id
+  private_subnet_ids  = module.networking.private_subnet_ids
+  web_security_group  = module.compute.web_security_group_id
+  db_password         = var.db_password
+  common_tags         = local.common_tags
+}
+MAIN
+
+# Create variables
+cat > variables.tf <<'VARS'
+variable "aws_region" {
+  default = "us-east-1"
+}
+
+variable "project_name" {
+  default = "techstore"
+}
+
+variable "vpc_cidr" {
+  default = "10.0.0.0/16"
+}
+
+variable "availability_zones" {
+  default = ["us-east-1a", "us-east-1b", "us-east-1c"]
+}
+
+variable "public_subnet_cidrs" {
+  default = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+}
+
+variable "private_subnet_cidrs" {
+  default = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+}
+
+variable "instance_type" {
+  default = "t3.micro"
+}
+
+variable "db_password" {
+  sensitive = true
+}
+VARS
+
+# Create outputs
+cat > outputs.tf <<'OUTPUTS'
+output "vpc_id" {
+  value = module.networking.vpc_id
+}
+
+output "web_server_url" {
+  value = "http://${module.compute.public_ip}"
+}
+
+output "database_endpoint" {
+  value     = module.database.endpoint
+  sensitive = true
+}
+OUTPUTS
+
+echo "✅ Terraform project structure created!"
+echo ""
+echo "Next steps:"
+echo "  1. cd techstore-terraform"
+echo "  2. terraform init"
+echo "  3. terraform plan"
+echo "  4. terraform apply"
+EOF
+
+chmod +x create-complete-terraform-project.sh
+bash create-complete-terraform-project.sh
+```
+
+---
+
+## 🎯 Summary: Terraform Journey
+
+### **What You've Learned:**
+
+```
+✅ Basic Concepts
+  - Providers, Resources, Variables, Outputs
+ 
+✅ Advanced Features
+  - Modules (reusable code)
+  - Remote State (team collaboration)
+  - Workspaces (dev/staging/prod)
+  - Data Sources (query existing)
+  - Locals (computed values)
+  - For_each (better than count)
+  - Provisioners (last resort)
+  - Import (existing resources)
+ 
+✅ Best Practices
+  - Project structure
+  - Security
+  - Documentation
+  - State management
+```
+
+### **Terraform vs Bash:**
+
+| Aspect | Bash Scripts | Terraform |
+|--------|-------------|-----------|
+| Approach | Imperative (how) | Declarative (what) |
+| State | Manual tracking | Automatic |
+| Idempotency | Manual checks | Built-in |
+| Dependencies | Manual ordering | Automatic graph |
+| Reusability | Copy-paste | Modules |
+| Team collaboration | Difficult | Remote state |
+| Rollback | Manual | `terraform apply` old state |
+
+---
+
+**🎉 You now know Terraform!**
+
+Want to:
+1. Build the complete project?
+2. Learn about testing Terraform?
+3. Explore Terraform Cloud?
+4. Something else?
+
+Let me know! 🚀
