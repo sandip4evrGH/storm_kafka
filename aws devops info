@@ -2,6 +2,19 @@
 [12/4, 1:04 AM] Sandip Patel: https://grok.com/share/bGVnYWN5LWNvcHk_0b3e6527-01c5-4b5a-b158-5a2009a0bf6b
 
 
+
+Using terraform aws create whole infrastructure with 
+kafka kraft 3.9, 12 nodes-3 controlles and brokers on all , apache storm running with zookeeper nimbus pacemaker and supervisor 12 nodes 
+Apache cassandra for metadata 3 nodes 
+For ENIS create ip az role and store in tf for all kafka, storm only for zookeepers.
+Store the enis in ssm parameters store, have the ec2 check for claimed and only assigne which is not claimed.
+Get the enis while creating ec2 in user data.
+Create userdata scripts and upload them on s3 to use with wrapper script.
+Create a wrapper script to call each userdata from s3 download.
+Create cloudwatch logs for cloudinit and application logs with dashboard
+
+
+
 # 🏗️ Converting AWS Infrastructure to Terraform
 
 Perfect! Let's convert everything to Infrastructure as Code (IaC) using Terraform. I'll teach you Terraform step-by-step using your actual infrastructure.
