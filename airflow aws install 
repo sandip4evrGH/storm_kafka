@@ -1,178 +1,239 @@
-You’re trying to install Apache Airflow on an EC2 instance that has no internet access, and you want to use an Airflow source bundle from another isolated server. This is a classic “air‑gapped installation” problem, and it is solvable — but only if you prepare the artifacts correctly on a machine that does have internet.
+You can absolutely run Apache Airflow on an isolated EC2 instance with no internet access — but you must prepare the environment before isolating it. Since you want API, Scheduler, DAG Processor, and Triggerer all running from Airflow source, the setup must be fully self‑contained.
 
-Given your automation-heavy workflow and preference for clean, atomic solutions, I’ll give you the production-grade, end‑to‑end method that works reliably in fully isolated AWS environments.
-
----
-
-🚀 Installing Airflow on an EC2 Instance With No Internet Access
-
-🧩 High-Level Strategy
-You need to:
-
-1. Prepare an offline Airflow installation bundle on a machine that does have internet.
-2. Transfer the bundle to the isolated EC2 instance (S3 VPC endpoint, SCP over bastion, EFS, etc.).
-3. Install Airflow from local wheels, not PyPI.
-4. Install system dependencies offline.
-5. Start Airflow normally (systemd, supervisord, or docker-compose).
-
-This avoids all outbound traffic.
+Below is a clean, production‑grade approach that fits your style: atomic, complete, and automation‑friendly.
 
 ---
 
-1️⃣ Prepare the Offline Airflow Bundle (on a machine with internet)
+🧱 Airflow on an Isolated EC2 (No Internet)
 
-Create a clean virtual environment
+1. High‑Level Architecture
+You will run all Airflow components on a single EC2 instance:
+
+| Component | Purpose |
+|----------|---------|
+| airflow webserver / API | REST API + UI |
+| airflow scheduler | Schedules DAG runs |
+| airflow dag‑processor | Parses DAGs in isolation |
+| airflow triggerer | Async tasks (deferrable operators) |
+| airflow worker (optional) | Only if using Celery/K8s |
+
+Since the instance is offline, you must pre‑package everything:
+
+- Python wheels for Airflow + dependencies  
+- Providers  
+- System packages  
+- Airflow source code  
+- Python virtualenv  
+- Local PyPI mirror (optional but ideal)
+
+---
+
+2. Prepare a Build Machine (With Internet)
+Use a separate EC2 or your laptop to build a fully offline Airflow bundle.
+
+2.1 Create a Python virtual environment
 `bash
-python3 -m venv airflow-build
-source airflow-build/bin/activate
+python3.9 -m venv airflow_venv
+source airflow_venv/bin/activate
 `
 
-Install Airflow version you want
-Example:
-`bash
-pip install "apache-airflow==2.9.1" --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.1/constraints-3.10.txt"
-`
-
-Download all required wheels
+2.2 Download Airflow + all dependencies as wheels
 This is the critical step.
 
 `bash
-mkdir airflow-offline
-pip download apache-airflow==2.9.1 \
-  --dest airflow-offline \
-  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.1/constraints-3.10.txt"
+pip install apache-airflow==2.9.2 --constraint \
+  https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.9.txt
 `
 
-If you need providers:
+Then download all wheels:
+
 `bash
-pip download apache-airflow-providers-amazon \
-  --dest airflow-offline
+mkdir airflow_wheels
+pip download apache-airflow==2.9.2 \
+  --dest airflow_wheels \
+  --constraint https://raw.githubusercontent.com/apache/airflow/constraints-2.9.2/constraints-3.9.txt
 `
 
-If you need extras:
+Also download provider packages:
+
 `bash
-pip download "apache-airflow[postgres,celery,redis]" \
-  --dest airflow-offline
+pip download 'apache-airflow-providers-*' --dest airflow_wheels
 `
 
-You now have a directory containing 100% of the wheels needed to install Airflow offline.
-
-Optional: Package it as a tarball
+2.3 Package Airflow source
 `bash
-tar -czvf airflow-offline-bundle.tar.gz airflow-offline/
+git clone https://github.com/apache/airflow.git
+cd airflow
+git checkout 2.9.2
+cd ..
+tar -czf airflow_source.tar.gz airflow/
 `
 
----
+2.4 Bundle everything
+Create a single tarball:
 
-2️⃣ Transfer the Bundle to the Isolated EC2 Instance
-
-Options:
-
-- SCP via bastion
-- S3 bucket + VPC endpoint
-- AWS Systems Manager Session Manager
-- EFS mount
-
-Example (SCP):
-`bash
-scp airflow-offline-bundle.tar.gz ec2-user@bastion:/tmp/
+`
+airflow_bundle/
+ ├── airflow_wheels/
+ ├── airflow_source.tar.gz
+ ├── bootstrap.sh
+ └── requirements.txt
 `
 
----
-
-3️⃣ Install Airflow Offline on the Isolated EC2
-
-Extract the bundle
-`bash
-tar -xzvf airflow-offline-bundle.tar.gz
-cd airflow-offline
-`
-
-Install system dependencies (offline)
-Airflow needs:
+Tar it:
 
 `bash
-sudo yum install -y gcc gcc-c++ python3-devel libffi-devel openssl-devel cyrus-sasl-devel
-`
-
-If your EC2 has no yum internet, you must also mirror RPMs from a connected machine:
-
-`bash
-yumdownloader --resolve gcc gcc-c++ python3-devel libffi-devel openssl-devel cyrus-sasl-devel
-`
-
-Transfer those RPMs and install:
-
-`bash
-sudo rpm -Uvh *.rpm
-`
-
-Install Airflow from local wheels
-`bash
-python3 -m venv airflow
-source airflow/bin/activate
-
-pip install --no-index --find-links . apache-airflow
-`
-
-If you have providers:
-`bash
-pip install --no-index --find-links . apache-airflow-providers-amazon
+tar -czf airflowofflinebundle.tar.gz airflow_bundle/
 `
 
 ---
 
-4️⃣ Initialize Airflow
+3. Transfer Bundle to the Isolated EC2
+Use SCP, S3 (private VPC endpoint), or AWS Session Manager.
+
+Example:
 
 `bash
-export AIRFLOW_HOME=~/airflow
+scp airflowofflinebundle.tar.gz ec2-user@<private-ip>:/opt/
+`
+
+---
+
+4. Install Airflow on the Isolated EC2
+SSH into the isolated instance.
+
+4.1 Extract bundle
+`bash
+cd /opt
+tar -xzf airflowofflinebundle.tar.gz
+cd airflow_bundle
+`
+
+4.2 Install system dependencies
+`bash
+sudo yum install -y gcc gcc-c++ python3-devel libffi-devel openssl-devel
+`
+
+4.3 Create Airflow virtualenv
+`bash
+python3.9 -m venv /opt/airflow_venv
+source /opt/airflow_venv/bin/activate
+`
+
+4.4 Install Airflow from wheels (offline)
+`bash
+pip install --no-index --find-links=airflow_wheels apache-airflow
+pip install --no-index --find-links=airflow_wheels apache-airflow-providers-*
+`
+
+4.5 Initialize Airflow
+`bash
+export AIRFLOW_HOME=/opt/airflow
 airflow db init
 airflow users create \
-  --username admin \
-  --password admin \
-  --firstname Sandip \
-  --lastname Admin \
-  --role Admin \
-  --email admin@example.com
+  --username admin --password admin \
+  --firstname Admin --lastname User \
+  --role Admin --email admin@example.com
 `
 
 ---
 
-5️⃣ Start Airflow Services
+5. Run All Airflow Components
+You want:
 
-Webserver
-`bash
-airflow webserver -p 8080
+- API
+- Scheduler
+- DAG Processor
+- Triggerer
+
+Run each as a systemd service (recommended).
+
+---
+
+6. Systemd Services (Production‑Ready)
+Create:
+
+`
+/etc/systemd/system/airflow-webserver.service
+/etc/systemd/system/airflow-scheduler.service
+/etc/systemd/system/airflow-triggerer.service
+/etc/systemd/system/airflow-dag-processor.service
+`
+
+Example: Webserver/API
+`ini
+[Unit]
+Description=Airflow Webserver
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME=/opt/airflow
+User=ec2-user
+Group=ec2-user
+ExecStart=/opt/airflow_venv/bin/airflow webserver
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
 `
 
 Scheduler
-`bash
-airflow scheduler
+`ini
+ExecStart=/opt/airflow_venv/bin/airflow scheduler
 `
 
-For production, you’ll want systemd units — I can generate those too if you want.
+Triggerer
+`ini
+ExecStart=/opt/airflow_venv/bin/airflow triggerer
+`
+
+DAG Processor
+`ini
+ExecStart=/opt/airflow_venv/bin/airflow dag-processor
+`
+
+Enable all:
+
+`bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now airflow-webserver airflow-scheduler airflow-triggerer airflow-dag-processor
+`
 
 ---
 
-🧱 Optional: Fully Automated Bash Script (Airflow Offline Installer)
-If you want, I can generate a single atomic Bash script that:
+7. DAG Deployment (Offline)
+You have two options:
 
-- Installs system dependencies (from local RPMs)
-- Creates venv
-- Installs Airflow from local wheels
-- Configures AIRFLOW_HOME
-- Creates admin user
-- Sets up systemd services
+Option A: Copy DAGs manually
+`bash
+scp dags/*.py ec2-user@<private-ip>:/opt/airflow/dags/
+`
 
-Just say the word and I’ll produce the full script in one shot.
+Option B: Use GitSync‑like local mirror
+Clone repo on build machine → copy to EC2.
 
 ---
 
-If you tell me:
+8. Optional: Create a Local PyPI Mirror (Best for long‑term)
+If you want to install new Python packages offline:
 
-- Airflow version
-- Python version
-- Providers you need
-- EC2 OS (Amazon Linux 2, AL2023, Ubuntu)
+`bash
+pip download <package> -d local_pypi/
+python3 -m http.server 8080 --directory local_pypi
+`
 
-…I’ll tailor the bundle and installer exactly to your environment.
+Then on EC2:
+
+`bash
+pip install --no-index --find-links=/opt/local_pypi <package>
+`
+
+---
+
+If you want, I can generate:
+- A single Bash script that installs everything end‑to‑end  
+- A Terraform module that provisions the isolated EC2 + systemd services  
+- A Packer AMI that bakes Airflow fully offline  
+- A complete automation bundle matching your workflow style  
+
+Just tell me the direction you prefer.
