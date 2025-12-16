@@ -854,3 +854,355 @@ If you want, I can generate:
 - A WireGuard config for secure on‑prem ↔ AWS connectivity  
 
 Tell me what you want next and I’ll build it.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+last one
+You’re now going for the “real” offline flavor:
+
+- No Internet from EC2
+- Airflow installed from a pre-baked offline bundle
+- Still using:
+  - RDS (private)
+  - S3 for logs via VPC endpoint (no public internet)
+
+Everything in Terraform stays roughly the same except:
+
+1. EC2 must get the Airflow offline bundle copied to it.
+2. userdata must install Airflow from that bundle (no pip install from the internet, no constraints URL).
+
+Below is the minimal change set to convert the previous setup to offline.
+
+---
+
+1. Expected offline bundle layout
+
+On your local machine (where you run Terraform) you have:
+
+`text
+airflow-hybrid/
+ ├── ...
+ ├── files/
+ │    └── airflowofflinebundle.tar.gz
+ └── userdata/
+      └── installairflowbackend_offline.sh
+`
+
+And inside airflowofflinebundle.tar.gz (same pattern you’re already using):
+
+`text
+airflow_bundle/
+ ├── airflow_wheels/           # All wheels (Airflow + deps + providers)
+ ├── airflow_source.tar.gz     # Optional, if you kept source
+ └── anythingelseyou_need/
+`
+
+You built this on an online box using something like:
+
+`bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install "apache-airflow==2.9.2" --constraint <constraints-url>
+mkdir airflow_wheels
+pip download "apache-airflow==2.9.2" --dest airflow_wheels --constraint <constraints-url>
+pip download "apache-airflow-providers-*" --dest airflow_wheels
+tar -czf airflowofflinebundle.tar.gz airflow_bundle/
+`
+
+---
+
+2. Terraform: copy the offline bundle to the backend EC2
+
+Update ec2_backend.tf to:
+
+- Use the same instance resource
+- Add a file provisioner to copy the bundle
+- Use offline userdata script
+
+`hcl
+data "awsami" "amazonlinux_2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+}
+
+resource "awsinstance" "airflowbackend" {
+  ami                    = data.awsami.amazonlinux_2023.id
+  instancetype          = var.backendinstance_type
+  subnetid              = data.awssubnet.private_backend.id
+  vpcsecuritygroupids = [awssecuritygroup.airflowbackend_sg.id]
+  iaminstanceprofile   = awsiaminstanceprofile.airflowbackend_profile.name
+  associatepublicip_address = false
+
+  userdata = templatefile("${path.module}/userdata/installairflowbackendoffline.sh", {
+    dbendpoint        = awsdbinstance.airflowmeta.address
+    dbusername        = var.dbusername
+    dbpassword        = var.dbpassword
+    s3logbucket      = awss3bucket.airflow_logs.bucket
+    airflowfernetkey = var.airflowfernetkey
+  })
+
+Make sure Terraform can SSH/WinRM into this box from your runner (bastion or via VPN)
+  provisioner "file" {
+    source      = "${path.module}/files/airflowofflinebundle.tar.gz"
+    destination = "/opt/airflowofflinebundle.tar.gz"
+
+    connection {
+      type        = "ssh"
+      host        = self.private_ip
+      user        = "ec2-user"
+      privatekey = file(var.sshprivatekeypath)
+    }
+  }
+
+  tags = {
+    Name = "airflow-backend"
+  }
+}
+`
+
+Add to variables.tf:
+
+`hcl
+variable "sshprivatekey_path" {
+  type        = string
+  description = "Path to private key Terraform will use to SSH into backend EC2 for file provisioner"
+}
+`
+
+You’ll pass sshprivatekey_path in tfvars.
+
+---
+
+3. Offline userdata: installairflowbackend_offline.sh
+
+This is the key piece. It:
+
+- Extracts /opt/airflowofflinebundle.tar.gz
+- Installs Airflow from local wheels only (--no-index --find-links)
+- Configures:
+  - LocalExecutor
+  - RDS connection
+  - S3 logging
+  - fernet_key
+- Sets up systemd services: webserver, scheduler, triggerer, dag-processor
+
+`bash
+
+!/bin/bash
+set -euo pipefail
+
+DBENDPOINT="${dbendpoint}"
+DBUSERNAME="${dbusername}"
+DBPASSWORD="${dbpassword}"
+S3LOGBUCKET="${s3logbucket}"
+FERNETKEY="${airflowfernet_key}"
+
+yum update -y
+yum install -y python3 python3-devel gcc gcc-c++ openssl-devel libffi-devel tar
+
+Extract offline bundle
+cd /opt
+tar -xzf /opt/airflowofflinebundle.tar.gz
+
+Expecting: /opt/airflowbundle/airflowwheels
+OFFLINEROOT="/opt/airflowbundle"
+WHEELDIR="${OFFLINEROOT}/airflow_wheels"
+
+python3 -m venv /opt/airflow_venv
+source /opt/airflow_venv/bin/activate
+
+pip install --upgrade pip
+
+Install Airflow + providers from wheels only (no index)
+pip install --no-index --find-links="${WHEEL_DIR}" apache-airflow
+pip install --no-index --find-links="${WHEEL_DIR}" apache-airflow-providers-*
+
+export AIRFLOW_HOME=/opt/airflow
+mkdir -p "$AIRFLOW_HOME"
+
+Initialize database (Airflow will talk to RDS)
+airflow db init
+
+AIRFLOWCFG="${AIRFLOWHOME}/airflow.cfg"
+
+Set SQLAlchemy connection
+sed -i "s@^sqlalchemyconn = .*@sqlalchemyconn = postgresql+psycopg2://${DBUSERNAME}:${DBPASSWORD}@${DBENDPOINT}:5432/airflow@" "$AIRFLOWCFG"
+
+Set executor
+sed -i "s/^executor = .*/executor = LocalExecutor/" "$AIRFLOW_CFG"
+
+Set fernet key
+sed -i "s/^fernetkey = .*/fernetkey = ${FERNETKEY}/" "$AIRFLOWCFG"
+
+Logging to S3
+sed -i "s/^remotelogging = .*/remotelogging = True/" "$AIRFLOW_CFG"
+sed -i "s@^remotebaselogfolder = .*@remotebaselogfolder = s3://${S3LOGBUCKET}/logs@" "$AIRFLOW_CFG"
+sed -i "s/^remotelogconnid = .*/remotelogconnid = awsdefault/" "$AIRFLOWCFG"
+sed -i "s/^encrypts3logs = .*/encrypts3logs = False/" "$AIRFLOW_CFG"
+sed -i "s/^deletelocallogs = .*/deletelocallogs = True/" "$AIRFLOW_CFG"
+
+Admin user (ignore if exists)
+airflow users create \
+  --username admin \
+  --password admin \
+  --firstname Admin \
+  --lastname User \
+  --role Admin \
+  --email admin@example.com || true
+
+Systemd: webserver
+cat <<EOF >/etc/systemd/system/airflow-webserver.service
+[Unit]
+Description=Airflow Webserver
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME=/opt/airflow
+User=root
+Group=root
+ExecStart=/opt/airflow_venv/bin/airflow webserver --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Systemd: scheduler
+cat <<EOF >/etc/systemd/system/airflow-scheduler.service
+[Unit]
+Description=Airflow Scheduler
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME=/opt/airflow
+User=root
+Group=root
+ExecStart=/opt/airflow_venv/bin/airflow scheduler
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Systemd: triggerer
+cat <<EOF >/etc/systemd/system/airflow-triggerer.service
+[Unit]
+Description=Airflow Triggerer
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME=/opt/airflow
+User=root
+Group=root
+ExecStart=/opt/airflow_venv/bin/airflow triggerer
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+Systemd: DAG processor
+cat <<EOF >/etc/systemd/system/airflow-dag-processor.service
+[Unit]
+Description=Airflow DAG Processor
+After=network.target
+
+[Service]
+Environment=AIRFLOW_HOME=/opt/airflow
+User=root
+Group=root
+ExecStart=/opt/airflow_venv/bin/airflow dag-processor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now \
+  airflow-webserver \
+  airflow-scheduler \
+  airflow-triggerer \
+  airflow-dag-processor
+`
+
+No internet in that script: only uses the local wheel directory.
+
+---
+
+4. Security groups stay the same (still offline from internet)
+
+From the last setup, you keep:
+
+- Backend SG with:
+  - Ingress 8080 + 22 from onprem_cidr
+  - Egress 5432 to RDS SG
+  - Egress 443 to VPC CIDR (for S3 endpoint)
+
+And no 0.0.0.0/0 egress. That gives you:
+
+- No public internet
+- Only:
+  - On-prem ↔ backend (for API/SSH)
+  - Backend ↔ RDS
+  - Backend ↔ S3 via VPC endpoint
+
+---
+
+5. On‑prem webserver stays the same
+
+On‑prem node:
+
+- Install the same Airflow version (from its own offline bundle or internet, your call).
+- Use the same:
+  - sqlalchemyconn → RDS
+  - executor = LocalExecutor
+  - fernet_key (exact same)
+  - [logging] → S3 config
+
+Only run:
+
+`bash
+airflow webserver --port 8080
+`
+
+and open that on‑prem port to your users.
+
+---
+
+If you want, I can next:
+
+- Strip this into a single main.tf module with fewer files, or  
+- Generate a Packer template that bakes the offline bundle into an AMI so Terraform doesn’t need the file provisioner at all.
