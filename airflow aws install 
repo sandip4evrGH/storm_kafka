@@ -648,3 +648,209 @@ Want me to generate:
 - A VPC module with isolated subnets  
 
 Just tell me and I’ll produce it in one shot.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+If the Airflow Webserver/API must run on‑prem, and the Scheduler + Triggerer + DAG Processor stay on AWS EC2, the architecture changes — and so do the network rules and Terraform design.
+
+Let’s walk through the clean, production‑grade layout that fits your style: minimal friction, atomic, and fully deterministic.
+
+---
+
+🧭 High‑Level Architecture (Hybrid: On‑Prem + AWS)
+
+On‑Prem Server
+- Runs:
+  - airflow webserver (UI)
+  - airflow api (REST API)
+- Connects to:
+  - Airflow metadata DB (on‑prem or AWS RDS)
+  - Airflow backend EC2 (scheduler/triggerer/dag‑processor)
+
+AWS EC2 (Backend Node)
+- Runs:
+  - airflow scheduler
+  - airflow triggerer
+  - airflow dag-processor
+- Connects to:
+  - Metadata DB
+  - On‑prem API/Webserver
+
+---
+
+🔐 Required Network Connectivity (Hybrid)
+
+This is the part most people get wrong. Airflow components talk to each other using bi‑directional RPC, so you must allow traffic both ways.
+
+---
+
+1. On‑Prem → AWS EC2 (Backend)
+
+| Port | Purpose |
+|------|---------|
+| 8793 | Scheduler heartbeat / RPC |
+| 8794 | DAG Processor RPC |
+| 8796 | Triggerer RPC |
+| 5432 / 3306 | Metadata DB (if DB is in AWS) |
+
+---
+
+2. AWS EC2 → On‑Prem (Webserver/API)
+
+| Port | Purpose |
+|------|---------|
+| 8080 | Airflow Webserver/API |
+| 5432 / 3306 | Metadata DB (if DB is on‑prem) |
+
+---
+
+3. Optional (SSH)
+
+| Port | Purpose |
+|------|---------|
+| 22 | SSH from on‑prem to EC2 (optional) |
+
+---
+
+🧱 Security Group Rules (AWS Side)
+
+SG‑BACKEND (AWS EC2)
+
+Ingress (from on‑prem public IP or VPN CIDR):
+- TCP 8793
+- TCP 8794
+- TCP 8796
+- TCP 22 (optional)
+- TCP 5432/3306 (if DB is AWS RDS)
+
+Egress (to on‑prem):
+- TCP 8080 (API/Webserver)
+- TCP 5432/3306 (if DB is on‑prem)
+
+---
+
+🧱 On‑Prem Firewall Rules
+
+Allow inbound from AWS EC2 private IP / VPC CIDR:
+- TCP 8080 (Webserver/API)
+
+Allow outbound to AWS EC2:
+- TCP 8793
+- TCP 8794
+- TCP 8796
+
+---
+
+🧩 Terraform Changes (AWS Side Only)
+
+Your Terraform module for the backend EC2 stays almost identical — except the SG must allow on‑prem CIDR.
+
+Example:
+
+`hcl
+variable "onprem_cidr" {
+  type = string
+}
+
+resource "awssecuritygroup" "airflow_backend" {
+  name        = "airflow-backend-sg"
+  description = "Airflow backend SG"
+  vpcid      = data.awsvpc.default.id
+
+  ingress {
+    description = "Scheduler RPC"
+    from_port   = 8793
+    to_port     = 8793
+    protocol    = "tcp"
+    cidrblocks = [var.onpremcidr]
+  }
+
+  ingress {
+    description = "DAG Processor RPC"
+    from_port   = 8794
+    to_port     = 8794
+    protocol    = "tcp"
+    cidrblocks = [var.onpremcidr]
+  }
+
+  ingress {
+    description = "Triggerer RPC"
+    from_port   = 8796
+    to_port     = 8796
+    protocol    = "tcp"
+    cidrblocks = [var.onpremcidr]
+  }
+
+  egress {
+    description = "To on-prem Airflow API"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidrblocks = [var.onpremcidr]
+  }
+}
+`
+
+---
+
+🧠 Important Architectural Notes
+
+1. You MUST have stable connectivity
+Either:
+- AWS Direct Connect  
+- Site‑to‑Site VPN  
+- Or a secure tunnel (WireGuard, IPSec)
+
+Airflow RPC will break if the link is unstable.
+
+---
+
+2. Metadata DB must be reachable by both nodes
+Options:
+- On‑prem Postgres/MySQL  
+- AWS RDS with inbound rules for on‑prem  
+- Self‑hosted DB on EC2 (not recommended)
+
+---
+
+3. DAGs must be synchronized
+Options:
+- Git repo (best)
+- Shared NFS mount
+- rsync from on‑prem → AWS
+
+---
+
+If you want, I can generate:
+- A complete Terraform module for the backend EC2 with hybrid networking  
+- A systemd service pack for your on‑prem Airflow webserver  
+- A diagram of the hybrid architecture  
+- A WireGuard config for secure on‑prem ↔ AWS connectivity  
+
+Tell me what you want next and I’ll build it.
